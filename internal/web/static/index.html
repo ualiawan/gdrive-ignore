@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gdrive-ignore</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><path d="M11 4h10l9 16-5 8H7l-5-8z" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/><path d="M8 26 26 8" stroke="var(--danger)" stroke-width="3" stroke-linecap="round"/></svg>
+    <div>
+      <h1>gdrive-ignore</h1>
+      <p class="sub">Choose what Google Drive syncs, with .gitignore-style rules</p>
+    </div>
+  </div>
+  <div id="drive-status" class="chip">Checking Google Drive…</div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button role="tab" data-tab="pairs" class="active">Folders</button>
+  <button role="tab" data-tab="global">Global rules</button>
+  <button role="tab" data-tab="settings">Settings</button>
+</nav>
+
+<main>
+  <section id="tab-pairs" class="tab active">
+    <div id="install-banner"></div>
+    <div class="toolbar">
+      <button id="add-pair" class="primary">Add folder</button>
+      <button id="sync-all">Sync all now</button>
+    </div>
+    <div id="pairs"></div>
+  </section>
+
+  <section id="tab-global" class="tab">
+    <p class="hint">These rules apply to every folder that has <em>Apply global rules</em> on. They are saved in <code id="global-path"></code>, so you can also edit them in any text editor.</p>
+    <div class="rules-editor" id="global-editor"></div>
+    <div class="toolbar end">
+      <span id="global-msg" class="msg"></span>
+      <button id="global-save" class="primary">Save global rules</button>
+    </div>
+  </section>
+
+  <section id="tab-settings" class="tab">
+    <div class="card form">
+      <label class="check"><input type="checkbox" id="set-autostart"> Start with Windows</label>
+      <label>Full rescan every <input type="number" id="set-interval" min="1" max="1440" class="small"> minutes
+        <span class="hint">Changes are picked up instantly; the rescan is a safety net.</span></label>
+      <div class="toolbar">
+        <button id="set-save" class="primary">Save settings</button>
+        <span id="set-msg" class="msg"></span>
+      </div>
+    </div>
+    <div class="card form">
+      <h3>How it works</h3>
+      <p>Google Drive for Desktop has no way to exclude files. gdrive-ignore keeps a <strong>filtered mirror</strong> of each source folder inside a folder that Drive syncs, and leaves out everything your rules ignore. Drive then uploads the mirror as usual.</p>
+      <ul>
+        <li>Your source folder is only ever read, never changed.</li>
+        <li>When the mirror is on the same drive as the source, files are <strong>hardlinked</strong>: no extra disk space and no copying.</li>
+        <li>The mirror is one-way. Edit files in the source, not in the mirror.</li>
+        <li>The app only ever deletes files it created itself.</li>
+      </ul>
+      <div class="toolbar">
+        <button id="open-logs">Open log folder</button>
+        <button id="quit" class="danger-outline">Quit gdrive-ignore</button>
+        <span class="hint" id="version"></span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<dialog id="editor">
+  <form method="dialog" id="editor-form">
+    <h2 id="editor-title">Add folder</h2>
+    <div class="grid">
+      <label>Source folder <span class="hint">the folder you work in</span>
+        <div class="row"><input id="f-source" required placeholder="C:\Users\you\projects"><button type="button" id="pick-source">Browse…</button></div>
+      </label>
+      <label>Sync to <span class="hint">where the filtered copy goes; Google Drive must sync this location</span>
+        <select id="f-location"></select>
+      </label>
+      <label id="custom-target-wrap">Target folder
+        <div class="row"><input id="f-target" required><button type="button" id="pick-target">Browse…</button></div>
+      </label>
+      <div id="target-note" class="note"></div>
+      <label>Name <input id="f-name" placeholder="Shown in the list"></label>
+    </div>
+
+    <h3>Ignore rules</h3>
+    <p class="hint">One pattern per line, like .gitignore: <code>node_modules/</code>, <code>*.log</code>, <code>/build</code>, <code>!keep.log</code>. <code>.driveignore</code> files inside the source folder are applied too.</p>
+    <div class="rules-editor" id="pair-editor"></div>
+    <div class="options">
+      <label class="check"><input type="checkbox" id="f-global" checked> Apply global rules</label>
+      <label class="check"><input type="checkbox" id="f-gitignore"> Also honor <code>.gitignore</code> files</label>
+      <label class="inline">Mode
+        <select id="f-mode">
+          <option value="auto">Automatic</option>
+          <option value="hardlink">Hardlink only</option>
+          <option value="copy">Always copy</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="toolbar">
+      <button type="button" id="preview-btn">Preview</button>
+      <span id="preview-summary" class="msg"></span>
+    </div>
+    <div id="preview" class="preview"></div>
+
+    <p id="editor-error" class="error"></p>
+    <div class="toolbar end">
+      <button type="button" id="editor-cancel">Cancel</button>
+      <button type="submit" class="primary" id="editor-save">Save and start syncing</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="confirm-remove">
+  <form method="dialog">
+    <h2>Remove folder?</h2>
+    <p>Syncing stops. Your source folder is not touched.</p>
+    <label class="check"><input type="checkbox" id="remove-mirror"> Also delete the mirrored copy (only files gdrive-ignore created; Drive moves them to its trash)</label>
+    <div class="toolbar end">
+      <button value="cancel">Cancel</button>
+      <button value="ok" class="danger">Remove</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>
