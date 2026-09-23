@@ -31,3 +31,6 @@ func Open(path string) error {
 	}
 	return exec.Command("xdg-open", path).Start()
 }
+
+// MessageBox is a no-op outside Windows for now.
+func MessageBox(title, text string) {}

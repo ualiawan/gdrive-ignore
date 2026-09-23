@@ -75,7 +75,7 @@ func TestAgentAPI(t *testing.T) {
 	must(err)
 	a.Start()
 	defer a.Stop()
-	rt, err := a.Serve(fstest.MapFS{"index.html": {Data: []byte("ui")}}, func() {})
+	rt, err := a.Serve(fstest.MapFS{"index.html": {Data: []byte("ui")}}, Hooks{Quit: func() {}})
 	must(err)
 	base := "http://127.0.0.1:" + strconv.Itoa(rt.Port)
 

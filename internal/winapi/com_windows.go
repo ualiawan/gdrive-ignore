@@ -196,3 +196,12 @@ func Open(path string) error {
 	}
 	return nil
 }
+
+var procMessageBox = windows.NewLazySystemDLL("user32.dll").NewProc("MessageBoxW")
+
+// MessageBox shows a simple informational dialog.
+func MessageBox(title, text string) {
+	var s pinned
+	defer runtime.KeepAlive(&s)
+	procMessageBox.Call(0, s.str(text), s.str(title), 0x40) // MB_ICONINFORMATION
+}

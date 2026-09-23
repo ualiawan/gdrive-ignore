@@ -478,7 +478,19 @@ func (a *Agent) SetSettings(s Settings) error {
 // PreviewResult is a dry run of a (possibly unsaved) pair.
 type PreviewResult struct {
 	mirror.PreviewResult
-	Truncated int `json:"truncated"` // ignored entries not listed
+	Truncated       int               `json:"truncated"` // ignored entries not listed
+	HardlinkCapable bool              `json:"hardlinkCapable"`
+	Location        *drivefs.Location `json:"location"` // Drive location covering the target
+}
+
+// SuggestedRoot is a local folder for mirrors on the user's profile drive.
+// Added once to Drive as a computer folder, it allows hardlinks.
+func SuggestedRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "DriveMirror")
 }
 
 // Preview dry-runs a pair's rules against its source without writing.
@@ -489,8 +501,10 @@ func (a *Agent) Preview(p config.Pair) (PreviewResult, error) {
 		return PreviewResult{}, err
 	}
 	defer os.RemoveAll(tmp)
+	realTarget := p.Target
 	if p.Target == "." || p.Target == "" || mirror.Validate(p.Source, p.Target) != nil {
 		p.Target = filepath.Join(tmp, "target")
+		realTarget = ""
 	}
 	a.mu.Lock()
 	eng, err := a.engineFor(p, filepath.Join(tmp, "manifest.json"))
@@ -504,6 +518,10 @@ func (a *Agent) Preview(p config.Pair) (PreviewResult, error) {
 	}
 	sort.Slice(res.Ignored, func(i, j int) bool { return res.Ignored[i].Size > res.Ignored[j].Size })
 	out := PreviewResult{PreviewResult: res}
+	if realTarget != "" {
+		out.HardlinkCapable = mirror.HardlinkCapable(p.Source, realTarget)
+		out.Location = a.Drive(false).Covering(realTarget)
+	}
 	const limit = 1000
 	if len(out.Ignored) > limit {
 		out.Truncated = len(out.Ignored) - limit
@@ -521,13 +539,49 @@ func (a *Agent) Check(abs string) (pair string, res ignore.Result, err error) {
 			continue
 		}
 		rel, _ := filepath.Rel(p.Source, abs)
-		lp := a.live[p.ID]
-		if lp == nil || lp.eng == nil {
-			return p.Name, res, errors.New("this folder pair is not running; check its status")
+		var loader *ignore.Loader
+		if lp := a.live[p.ID]; lp != nil && lp.eng != nil {
+			loader = lp.eng.Loader()
+		} else {
+			// Not running (e.g. CLI use): build the rules without syncing.
+			eng, err := a.engineFor(p, filepath.Join(os.TempDir(), "gdrive-ignore-check-unused.json"))
+			if err != nil {
+				return p.Name, res, err
+			}
+			loader = eng.Loader()
 		}
 		fi, statErr := os.Stat(abs)
-		res, err = lp.eng.Loader().Check(filepath.ToSlash(rel), statErr == nil && fi.IsDir())
+		res, err = loader.Check(filepath.ToSlash(rel), statErr == nil && fi.IsDir())
 		return p.Name, res, err
 	}
 	return "", res, errors.New("path is not inside any source folder")
+}
+
+// PairResult is the outcome of one pair in SyncOnce.
+type PairResult struct {
+	Name  string
+	Stats mirror.Stats
+	Err   error
+}
+
+// SyncOnce runs one full pass for every unpaused pair without watching.
+// Use it only when no agent is running.
+func (a *Agent) SyncOnce() []PairResult {
+	a.mu.Lock()
+	pairs := append([]config.Pair(nil), a.cfg.Pairs...)
+	a.mu.Unlock()
+	var out []PairResult
+	for _, p := range pairs {
+		if p.Paused {
+			continue
+		}
+		r := PairResult{Name: p.Name}
+		eng, err := a.engineFor(p, config.ManifestPath(p.ID))
+		if err == nil {
+			r.Stats, err = eng.Reconcile("", true)
+		}
+		r.Err = err
+		out = append(out, r)
+	}
+	return out
 }

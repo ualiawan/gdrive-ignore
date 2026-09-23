@@ -49,9 +49,14 @@ func ReadRuntime() (Runtime, error) {
 
 const cookieName = "gdi"
 
-// Serve starts the API and UI server on a random loopback port. quit is
-// called when the UI asks the app to exit.
-func (a *Agent) Serve(assets fs.FS, quit func()) (Runtime, error) {
+// Hooks are app-level actions the UI can trigger.
+type Hooks struct {
+	Quit    func()       // exit the app
+	Install func() error // install for this user and restart from there
+}
+
+// Serve starts the API and UI server on a random loopback port.
+func (a *Agent) Serve(assets fs.FS, hooks Hooks) (Runtime, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return Runtime{}, err
@@ -61,7 +66,7 @@ func (a *Agent) Serve(assets fs.FS, quit func()) (Runtime, error) {
 	rt := Runtime{Port: ln.Addr().(*net.TCPAddr).Port, Token: hex.EncodeToString(tok), PID: os.Getpid()}
 
 	mux := http.NewServeMux()
-	a.routes(mux, quit)
+	a.routes(mux, hooks)
 	static := http.FileServerFS(assets)
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if t := r.URL.Query().Get("t"); t != "" {
@@ -145,15 +150,18 @@ func readJSON(r *http.Request, v any) error {
 	return json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4<<20)).Decode(v)
 }
 
-func (a *Agent) routes(mux *http.ServeMux, quit func()) {
+func (a *Agent) routes(mux *http.ServeMux, hooks Hooks) {
 	mux.HandleFunc("GET /api/state", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
-			"version":   a.Version,
-			"pairs":     a.Pairs(),
-			"drive":     a.Drive(r.URL.Query().Has("refresh")),
-			"settings":  a.Settings(),
-			"autostart": install.AutostartEnabled(),
-			"installed": install.IsInstalled(),
+			"version":          a.Version,
+			"pairs":            a.Pairs(),
+			"drive":            a.Drive(r.URL.Query().Has("refresh")),
+			"settings":         a.Settings(),
+			"autostart":        install.AutostartEnabled(),
+			"installed":        install.IsInstalled(),
+			"runningInstalled": install.RunningInstalled(),
+			"suggested":        SuggestedRoot(),
+			"globalPath":       config.GlobalRulesPath(),
 		})
 	})
 	mux.HandleFunc("GET /api/global", func(w http.ResponseWriter, r *http.Request) {
@@ -319,11 +327,22 @@ func (a *Agent) routes(mux *http.ServeMux, quit func()) {
 		}
 		writeJSON(w, map[string]bool{"ok": true})
 	})
+	mux.HandleFunc("POST /api/install", func(w http.ResponseWriter, r *http.Request) {
+		if hooks.Install == nil {
+			writeErr(w, errors.New("install is not available"), http.StatusBadRequest)
+			return
+		}
+		if err := hooks.Install(); err != nil {
+			writeErr(w, err, http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
+	})
 	mux.HandleFunc("POST /api/quit", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]bool{"ok": true})
 		go func() {
 			time.Sleep(100 * time.Millisecond)
-			quit()
+			hooks.Quit()
 		}()
 	})
 }
