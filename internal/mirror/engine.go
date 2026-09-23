@@ -96,6 +96,55 @@ type Engine struct {
 	man      *manifest
 	fresh    bool // no manifest yet
 	nonEmpty bool // target had content before we ever ran
+
+	ignMu       sync.RWMutex
+	ignoredDirs map[string]bool // dirs found ignored by the last walks
+}
+
+// InIgnoredDir reports whether rel lies strictly inside a directory that was
+// ignored when last walked. Watch events there can be dropped cheaply.
+func (e *Engine) InIgnoredDir(rel string) bool {
+	k := key(cleanRel(rel))
+	e.ignMu.RLock()
+	defer e.ignMu.RUnlock()
+	if len(e.ignoredDirs) == 0 {
+		return false
+	}
+	for i := strings.LastIndexByte(k, '/'); i > 0; i = strings.LastIndexByte(k[:i], '/') {
+		if e.ignoredDirs[k[:i]] {
+			return true
+		}
+	}
+	return false
+}
+
+// IsIgnoredDir reports whether rel itself was ignored as a directory when last walked.
+func (e *Engine) IsIgnoredDir(rel string) bool {
+	e.ignMu.RLock()
+	defer e.ignMu.RUnlock()
+	return e.ignoredDirs[key(cleanRel(rel))]
+}
+
+func (e *Engine) setIgnoredDir(rel string, ignored bool) {
+	e.ignMu.Lock()
+	defer e.ignMu.Unlock()
+	if ignored {
+		e.ignoredDirs[key(rel)] = true
+	} else {
+		delete(e.ignoredDirs, key(rel))
+	}
+}
+
+// forgetIgnoredDirs drops remembered ignored dirs at or below rel.
+func (e *Engine) forgetIgnoredDirs(rel string) {
+	e.ignMu.Lock()
+	defer e.ignMu.Unlock()
+	k := key(rel)
+	for d := range e.ignoredDirs {
+		if k == "" || d == k || strings.HasPrefix(d, k+"/") {
+			delete(e.ignoredDirs, d)
+		}
+	}
 }
 
 // New validates the pair and loads its manifest.
@@ -122,6 +171,8 @@ func New(opt Options) (*Engine, error) {
 		log:    opt.Log,
 		man:    man,
 		fresh:  !exists,
+
+		ignoredDirs: map[string]bool{},
 	}
 	if e.fresh {
 		entries, err := os.ReadDir(opt.Target)
@@ -222,6 +273,9 @@ func (r *run) reconcile(rel string, recursive bool) error {
 				return err
 			}
 		}
+		if recursive && !r.dry {
+			e.forgetIgnoredDirs(rel)
+		}
 		r.walk(rel, set, recursive)
 	}
 	r.prune(rel, recursive, !ok)
@@ -313,6 +367,9 @@ func (r *run) walk(relDir string, set *ignore.Set, recursive bool) {
 		}
 		if ign, rule := set.Match(rel, isDir); ign {
 			r.stats.Ignored++
+			if isDir && !r.dry {
+				e.setIgnoredDir(rel, true)
+			}
 			if r.dry {
 				r.recordIgnored(rel, isDir, de, rule)
 			}
@@ -322,6 +379,9 @@ func (r *run) walk(relDir string, set *ignore.Set, recursive bool) {
 		te, exists := tgt[key(name)]
 		if isDir {
 			r.stats.Dirs++
+			if !r.dry {
+				e.setIgnoredDir(rel, false)
+			}
 			if !r.syncDir(rel, te, exists) {
 				continue
 			}
