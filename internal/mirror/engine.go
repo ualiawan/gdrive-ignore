@@ -227,27 +227,56 @@ func (e *Engine) Reconcile(rel string, recursive bool) (Stats, error) {
 	return r.stats, nil
 }
 
+// PreviewResult is what a dry run found.
+type PreviewResult struct {
+	Stats       Stats          `json:"stats"`
+	Ignored     []IgnoredEntry `json:"ignored"`
+	IgnoreFiles []string       `json:"ignoreFiles"` // nested ignore files that apply
+}
+
 // Preview runs a dry pass over the whole pair and lists what is ignored.
 // With measure set, ignored folders are walked to total their size.
-func (e *Engine) Preview(measure bool) (Stats, []IgnoredEntry, error) {
+func (e *Engine) Preview(measure bool) (PreviewResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	r := e.newRun(true)
 	r.measure = measure
 	err := r.reconcile("", true)
 	r.stats.Duration = time.Since(r.start)
-	return r.stats, r.ignored, err
+	return PreviewResult{Stats: r.stats, Ignored: r.ignored, IgnoreFiles: r.ignoreFiles}, err
 }
 
+// Purge deletes everything the engine created in the target and forgets the
+// pair's manifest. Files it did not create are left alone.
+func (e *Engine) Purge() (Stats, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	r := e.newRun(false)
+	r.prune("", true, false)
+	if r.stats.ErrorCount > 0 {
+		_ = e.man.save(e.opt.Source, e.opt.Target)
+		return r.stats, fmt.Errorf("%d entries could not be removed: %s", r.stats.ErrorCount, strings.Join(r.stats.Errors, "; "))
+	}
+	err := os.Remove(e.opt.ManifestPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		err = nil
+	}
+	return r.stats, err
+}
+
+// HardlinkCapable reports whether files from source can be hardlinked into target.
+func HardlinkCapable(source, target string) bool { return hardlinkCapable(source, target) }
+
 type run struct {
-	e       *Engine
-	dry     bool
-	measure bool
-	start   time.Time
-	stats   Stats
-	desired map[string]bool
-	failed  []string // source dirs that could not be read; never prune below them
-	ignored []IgnoredEntry
+	e           *Engine
+	dry         bool
+	measure     bool
+	start       time.Time
+	stats       Stats
+	desired     map[string]bool
+	failed      []string // source dirs that could not be read; never prune below them
+	ignored     []IgnoredEntry
+	ignoreFiles []string
 }
 
 func (e *Engine) newRun(dry bool) *run {
@@ -398,6 +427,9 @@ func (r *run) walk(relDir string, set *ignore.Set, recursive bool) {
 		if err != nil {
 			r.stats.addErr(err)
 			continue
+		}
+		if r.dry && e.loader.IsIgnoreFile(name) {
+			r.ignoreFiles = append(r.ignoreFiles, rel)
 		}
 		r.stats.Files++
 		r.stats.Bytes += info.Size()

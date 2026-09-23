@@ -355,10 +355,11 @@ func TestPreviewIsDry(t *testing.T) {
 	f.write("build/out.bin", "12345")
 	f.write("build/more/x.bin", "123")
 	e := f.engine(ModeAuto, "build/")
-	st, ignored, err := e.Preview(true)
+	res, err := e.Preview(true)
 	if err != nil {
 		t.Fatal(err)
 	}
+	st, ignored := res.Stats, res.Ignored
 	if st.Files != 1 || len(ignored) != 1 {
 		t.Fatalf("preview: %+v %+v", st, ignored)
 	}
@@ -399,5 +400,30 @@ func TestValidate(t *testing.T) {
 	}
 	if err := Validate(src, filepath.Join(root, "dst")); err != nil {
 		t.Errorf("valid pair rejected: %v", err)
+	}
+}
+
+func TestPurgeRemovesOnlyOwned(t *testing.T) {
+	f := newFixture(t)
+	f.write("a/b.txt", "b")
+	f.write("a/.driveignore", "*.bak\n")
+	e := f.engine(ModeAuto, "")
+	f.sync(e)
+	if err := os.WriteFile(filepath.Join(f.dst, "a", "user.txt"), []byte("u"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.Preview(false)
+	if err != nil || len(res.IgnoreFiles) != 1 || res.IgnoreFiles[0] != "a/.driveignore" {
+		t.Fatalf("ignore files: %v %v", res.IgnoreFiles, err)
+	}
+	if _, err := e.Purge(); err != nil {
+		t.Fatal(err)
+	}
+	f.wantTree("a/", "a/user.txt")
+	if _, err := os.Stat(f.mani); !errors.Is(err, os.ErrNotExist) {
+		t.Error("manifest kept after purge")
+	}
+	if _, err := os.Stat(filepath.Join(f.src, "a", "b.txt")); err != nil {
+		t.Error("purge touched the source")
 	}
 }
