@@ -1,0 +1,13 @@
+﻿# local docs
+PLAN.md
+PROGRESS.md
+
+# build output
+/dist/
+/bin/
+*.exe
+*.syso
+
+# editor
+.vscode/
+.idea/
