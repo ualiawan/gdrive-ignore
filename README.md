@@ -114,3 +114,19 @@ internal/web           embedded UI (HTML/CSS/JS, no build step)
 internal/ui, tray      WebView2 window and tray icon
 internal/install       per-user install, autostart, PATH, uninstall
 ```
+
+## Disclaimer
+
+gdrive-ignore is provided **as is, without warranty of any kind**, and you use it **at your own risk**. It reads, creates, changes and deletes files in the folders you set up, and those changes reach Google Drive. The authors are not liable for data loss or any other damage arising from its use. See the [license](LICENSE) for the full terms.
+
+Before relying on it:
+
+- **Keep backups** of anything important. Sync, including this tool and Google Drive itself, is not a backup.
+- **Try it on a test folder first**, and use **Preview** to check your rules before syncing real data.
+- It depends on **undocumented behavior of Google Drive for Desktop** (its log and local database). A Drive update can change that behavior. The tool is designed to stop and ask instead of deleting when something looks unfamiliar, but this cannot be guaranteed.
+
+gdrive-ignore is an independent project. It is **not affiliated with, endorsed by or supported by Google**. Google Drive is a trademark of Google LLC.
+
+## License
+
+[MIT](LICENSE) © 2026 Usman Ali
