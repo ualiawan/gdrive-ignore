@@ -735,15 +735,32 @@ func linkFile(src, dst string, replace bool) error {
 	return nil
 }
 
-// copyFile copies src to dst via a temp file and sets dst's mtime.
+// copyFile copies src to dst in place and then sets dst's mtime. It writes
+// under the final name (no temp file) because Drive watches the target and
+// would otherwise see, and possibly upload, temp names. An interrupted copy
+// leaves a size/mtime mismatch, so the next pass rewrites it.
 func copyFile(src, dst string, mtime time.Time) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	tmp := tmpName(filepath.Dir(dst))
-	out, err := os.Create(tmp)
+	// If dst is a hardlink to src (e.g. the pair switched from hardlink to
+	// copy mode), writing in place would truncate the source. Unlink first.
+	if sfi, err := in.Stat(); err == nil {
+		if dfi, err := os.Stat(dst); err == nil && os.SameFile(sfi, dfi) {
+			if err := removeFile(dst); err != nil {
+				return err
+			}
+		}
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if errors.Is(err, fs.ErrPermission) {
+		// Read-only copy: replace it (copies never share data with the source).
+		if rerr := removeFile(dst); rerr == nil {
+			out, err = os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -751,16 +768,12 @@ func copyFile(src, dst string, mtime time.Time) error {
 	if cerr := out.Close(); err == nil {
 		err = cerr
 	}
-	if err == nil {
-		err = os.Chtimes(tmp, mtime, mtime)
-	}
-	if err == nil {
-		err = replaceFile(tmp, dst)
-	}
 	if err != nil {
-		_ = removeFile(tmp)
+		// Make sure the next pass sees a mismatch and retries.
+		_ = os.Chtimes(dst, time.Time{}, time.Unix(0, 0))
+		return err
 	}
-	return err
+	return os.Chtimes(dst, mtime, mtime)
 }
 
 // touch sets dst's times through its own path so change notifications fire

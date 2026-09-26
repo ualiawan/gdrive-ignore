@@ -427,3 +427,43 @@ func TestPurgeRemovesOnlyOwned(t *testing.T) {
 		t.Error("purge touched the source")
 	}
 }
+
+// Switching a pair from hardlink to copy mode must never write through the
+// old links into the source.
+func TestSwitchToCopyNeverTouchesSource(t *testing.T) {
+	f := newFixture(t)
+	f.write("a.txt", "original")
+	f.sync(f.engine(ModeHardlink, ""))
+	if !f.sameFile("a.txt") {
+		t.Fatal("expected hardlink")
+	}
+	time.Sleep(20 * time.Millisecond)
+	f.write("b.txt", "new") // something to copy
+	// Make the link's directory entry look stale so copy mode rewrites it.
+	if err := os.Chtimes(filepath.Join(f.dst, "a.txt"), time.Now(), time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	f.sync(f.engine(ModeCopy, ""))
+	b, err := os.ReadFile(filepath.Join(f.src, "a.txt"))
+	if err != nil || string(b) != "original" {
+		t.Fatalf("source changed: %q %v", b, err)
+	}
+	if f.sameFile("a.txt") {
+		t.Error("target still linked to source in copy mode")
+	}
+	if f.read("a.txt") != "original" || f.read("b.txt") != "new" {
+		t.Error("wrong target content")
+	}
+}
+
+// Copy mode writes under the final name: no temp files ever appear.
+func TestCopyModeUsesNoTempFiles(t *testing.T) {
+	f := newFixture(t)
+	f.write("a.txt", "1")
+	e := f.engine(ModeCopy, "")
+	f.sync(e)
+	time.Sleep(20 * time.Millisecond)
+	f.write("a.txt", "22")
+	f.sync(e)
+	f.wantTree("a.txt")
+}
