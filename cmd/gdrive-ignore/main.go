@@ -317,9 +317,12 @@ func cmdStatus() error {
 	}
 	for _, p := range st.Pairs {
 		s := p.Status
-		fmt.Printf("%s [%s, %s]\n  %s -> %s\n", p.Name, s.State, s.Mode, p.Source, p.Target)
-		fmt.Printf("  %d files (%s) mirrored, %d ignored, last sync %s\n",
-			s.Full.Files, human(s.Full.Bytes), s.Full.Ignored, s.LastSync.Local().Format(time.DateTime))
+		fmt.Printf("%s [%s]\n  %s <-> %s\n", p.Name, s.State, p.Source, p.Target)
+		fmt.Printf("  %d files (%s) in sync, %d ignored, last sync %s\n",
+			s.Last.Files, human(s.Last.Bytes), s.Last.Ignored, s.LastSync.Local().Format(time.DateTime))
+		for _, d := range p.Pending {
+			fmt.Printf("  needs a decision: %s (%s)\n", d.Path, d.Reason)
+		}
 		if p.SetupError != "" {
 			fmt.Println("  problem:", p.SetupError)
 		}
@@ -353,8 +356,8 @@ func cmdSync() error {
 			continue
 		}
 		s := r.Stats
-		fmt.Printf("%s: %d files, %d linked, %d copied, %d removed, %d errors (%s)\n",
-			r.Name, s.Files, s.Linked, s.Copied, s.Removed, s.ErrorCount, s.Duration.Round(time.Millisecond))
+		fmt.Printf("%s: %d files; %d to Drive, %d from Drive, %d renamed, %d conflicts, %d deleted in Drive, %d deleted here, %d need a decision, %d errors (%s)\n",
+			r.Name, s.Files, s.Pushed, s.Pulled, s.Renamed, s.Conflicts, s.DeletedInDrive, s.DeletedHere, s.Pending, s.ErrorCount, s.Duration.Round(time.Millisecond))
 		for _, e := range s.Errors {
 			fmt.Println("  ", e)
 		}
@@ -436,7 +439,7 @@ func cmdPreview(args []string) error {
 		ic += e.Count
 	}
 	fmt.Printf("%d files (%s) would sync; %d entries ignored (%d files, %s)\n\n",
-		res.Stats.Files, human(res.Stats.Bytes), res.Stats.Ignored, ic, human(ib))
+		res.Files, human(res.Bytes), len(res.Ignored)+res.Truncated, ic, human(ib))
 	for _, e := range res.Ignored {
 		name := e.Path
 		if e.Dir {

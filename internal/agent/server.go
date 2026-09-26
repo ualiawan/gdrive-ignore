@@ -209,7 +209,7 @@ func (a *Agent) routes(mux *http.ServeMux, hooks Hooks) {
 		writeJSON(w, map[string]bool{"ok": true})
 	})
 	mux.HandleFunc("DELETE /api/pairs/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if err := a.RemovePair(r.PathValue("id"), r.URL.Query().Get("deleteMirror") == "1"); err != nil {
+		if err := a.RemovePair(r.PathValue("id")); err != nil {
 			writeErr(w, err, http.StatusBadRequest)
 			return
 		}
@@ -234,6 +234,21 @@ func (a *Agent) routes(mux *http.ServeMux, hooks Hooks) {
 			err = errors.New("unknown action")
 		}
 		if err != nil {
+			writeErr(w, err, http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
+	})
+	mux.HandleFunc("POST /api/pairs/{id}/decide", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Path     string `json:"path"` // "" = all pending for this pair
+			Decision string `json:"decision"`
+		}
+		if err := readJSON(r, &body); err != nil {
+			writeErr(w, err, http.StatusBadRequest)
+			return
+		}
+		if err := a.Decide(r.PathValue("id"), body.Path, body.Decision); err != nil {
 			writeErr(w, err, http.StatusBadRequest)
 			return
 		}

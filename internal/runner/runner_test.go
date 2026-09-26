@@ -1,15 +1,15 @@
 package runner
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
 	"gdrive-ignore/internal/ignore"
-	"gdrive-ignore/internal/mirror"
+	"gdrive-ignore/internal/twoway"
 )
 
 func write(t *testing.T, root, rel, content string) {
@@ -25,7 +25,7 @@ func write(t *testing.T, root, rel, content string) {
 
 func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
@@ -45,65 +45,86 @@ func content(p string) string {
 	return string(b)
 }
 
-func TestRunnerFollowsChanges(t *testing.T) {
+// recorder is a classifier that answers "deleted by hand in the mirror" once
+// a vanish time is known, and records what it was asked.
+type recorder struct {
+	mu    sync.Mutex
+	calls []twoway.Deletion
+}
+
+func (c *recorder) Classify(d twoway.Deletion) twoway.Origin {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls = append(c.calls, d)
+	if d.Gone.IsZero() {
+		return twoway.OriginUnknown
+	}
+	if time.Since(d.Gone) < 300*time.Millisecond {
+		return twoway.OriginWait
+	}
+	return twoway.OriginMirror
+}
+
+func TestRunnerTwoWay(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("watcher is windows only for now")
 	}
 	root := t.TempDir()
-	src, dst := filepath.Join(root, "src"), filepath.Join(root, "dst")
+	src, dst := filepath.Join(root, "src"), filepath.Join(root, "mirror")
 	write(t, src, "keep.txt", "k")
 	write(t, src, "node_modules/x.js", "x")
-
-	eng, err := mirror.New(mirror.Options{
-		Source: src, Target: dst, ManifestPath: filepath.Join(root, "m.json"),
-		Rules: ignore.NewSet(ignore.Parse("node_modules/", "global", "")),
+	cls := &recorder{}
+	eng, err := twoway.New(twoway.Options{
+		Source: src, Target: dst, StatePath: filepath.Join(root, "state.json"),
+		Rules:      ignore.NewSet(ignore.Parse("node_modules/", "global", "")),
+		Classifier: cls,
+		Recycle:    func(string) error { t.Error("nothing should be recycled"); return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := Start(eng, src, Options{Debounce: 50 * time.Millisecond, MaxWait: 200 * time.Millisecond})
+	r := Start(eng, src, dst, Options{Debounce: 50 * time.Millisecond, MaxWait: 200 * time.Millisecond})
 	defer r.Stop()
 
 	eventually(t, "initial sync", func() bool { return exists(filepath.Join(dst, "keep.txt")) })
 	eventually(t, "watching", func() bool { return r.Status().Watching && r.Status().State == StateIdle })
 	if exists(filepath.Join(dst, "node_modules")) {
-		t.Fatal("ignored dir mirrored")
+		t.Fatal("ignored folder pushed")
 	}
 
-	// New nested file.
+	// PC → Drive.
 	write(t, src, "a/b/new.txt", "n")
-	eventually(t, "new nested file", func() bool { return content(filepath.Join(dst, "a", "b", "new.txt")) == "n" })
+	eventually(t, "push", func() bool { return content(filepath.Join(dst, "a", "b", "new.txt")) == "n" })
 
-	// Atomic save.
-	write(t, src, "keep.txt.tmp", "v2")
-	if err := os.Rename(filepath.Join(src, "keep.txt.tmp"), filepath.Join(src, "keep.txt")); err != nil {
-		t.Fatal(err)
+	// Drive → PC: a file downloaded into the mirror.
+	write(t, dst, "from-drive.txt", "d")
+	eventually(t, "pull", func() bool { return content(filepath.Join(src, "from-drive.txt")) == "d" })
+
+	// Drive replaces a file (new version downloaded).
+	tmp := filepath.Join(dst, "keep.txt.dl")
+	os.WriteFile(tmp, []byte("v2 from drive"), 0o644)
+	os.Rename(tmp, filepath.Join(dst, "keep.txt"))
+	eventually(t, "remote edit", func() bool { return content(filepath.Join(src, "keep.txt")) == "v2 from drive" })
+
+	// Hand deletion in the mirror: the runner must timestamp it, wait for
+	// evidence, and restore it; the source is never touched.
+	os.Remove(filepath.Join(dst, "from-drive.txt"))
+	eventually(t, "restored", func() bool { return exists(filepath.Join(dst, "from-drive.txt")) })
+	if !exists(filepath.Join(src, "from-drive.txt")) {
+		t.Fatal("source lost the file")
 	}
-	eventually(t, "atomic save", func() bool { return content(filepath.Join(dst, "keep.txt")) == "v2" })
-
-	// A new .driveignore removes matching files.
-	write(t, src, "a/.driveignore", "b/\n")
-	eventually(t, "rule applied", func() bool { return !exists(filepath.Join(dst, "a", "b")) })
-
-	// Renaming a folder moves its content.
-	if err := os.Rename(filepath.Join(src, "a"), filepath.Join(src, "renamed")); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, "folder rename", func() bool {
-		return !exists(filepath.Join(dst, "a")) && exists(filepath.Join(dst, "renamed", ".driveignore"))
-	})
-
-	// A storm inside an ignored dir does not trigger work.
-	before := r.Status().LastSync
-	for i := 0; i < 300; i++ {
-		write(t, src, filepath.ToSlash(filepath.Join("node_modules", "pkg", "f"+string(rune('a'+i%26))+".js")), "x")
-	}
-	time.Sleep(400 * time.Millisecond)
-	if !r.Status().LastSync.Equal(before) {
-		t.Error("events inside an ignored dir triggered a sync")
+	cls.mu.Lock()
+	sawTime := len(cls.calls) > 0 && !cls.calls[len(cls.calls)-1].Gone.IsZero()
+	cls.mu.Unlock()
+	if !sawTime {
+		t.Fatal("classifier did not receive a vanish time")
 	}
 
-	// Paused: changes wait until resumed.
+	// Deleting in the source deletes from the mirror.
+	os.Remove(filepath.Join(src, "a", "b", "new.txt"))
+	eventually(t, "source delete", func() bool { return !exists(filepath.Join(dst, "a", "b", "new.txt")) })
+
+	// Paused: nothing moves until resumed.
 	r.SetPaused(true)
 	write(t, src, "later.txt", "l")
 	time.Sleep(400 * time.Millisecond)
@@ -116,36 +137,18 @@ func TestRunnerFollowsChanges(t *testing.T) {
 
 func TestRunnerNeedsAdopt(t *testing.T) {
 	root := t.TempDir()
-	src, dst := filepath.Join(root, "src"), filepath.Join(root, "dst")
+	src, dst := filepath.Join(root, "src"), filepath.Join(root, "mirror")
 	write(t, src, "a.txt", "a")
 	write(t, dst, "existing.txt", "e")
-	eng, err := mirror.New(mirror.Options{Source: src, Target: dst, ManifestPath: filepath.Join(root, "m.json")})
+	eng, err := twoway.New(twoway.Options{Source: src, Target: dst, StatePath: filepath.Join(root, "s.json"),
+		Recycle: func(string) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := Start(eng, src, Options{})
+	r := Start(eng, src, dst, Options{})
 	defer r.Stop()
-	eventually(t, "needs-adopt state", func() bool { return r.Status().State == StateNeedsAdopt })
-	if exists(filepath.Join(dst, "a.txt")) {
-		t.Fatal("synced into non-empty target without adopt")
-	}
-	if _, err := eng.Reconcile("", true); !errors.Is(err, mirror.ErrTargetNotEmpty) {
-		t.Fatal(err)
-	}
-}
-
-func TestCoalesce(t *testing.T) {
-	got := coalesce(map[string]bool{"a": true, "a/b": false, "a/c": true, "x": false, "ab": false})
-	want := []job{{"a", true}, {"ab", false}, {"x", false}}
-	if len(got) != len(want) {
-		t.Fatalf("got %v", got)
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			t.Fatalf("got %v, want %v", got, want)
-		}
-	}
-	if got := coalesce(map[string]bool{"": true, "a": false}); len(got) != 1 || got[0].rel != "" {
-		t.Fatalf("root recursive should cover all: %v", got)
+	eventually(t, "needs-adopt", func() bool { return r.Status().State == StateNeedsAdopt })
+	if exists(filepath.Join(dst, "a.txt")) || exists(filepath.Join(src, "existing.txt")) {
+		t.Fatal("synced without confirmation")
 	}
 }

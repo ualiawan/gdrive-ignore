@@ -900,7 +900,12 @@ func (r *run) onlySource(S *tree, k string, s node, b entry, bok bool, forced Or
 	case OriginWait:
 		r.skip[k] = true
 		if g := r.e.goneTime(k); !g.IsZero() {
-			next := g.Add(6 * time.Second)
+			// Past the classifier's evidence window, and never in the past
+			// (that would make the runner spin).
+			next := g.Add(7 * time.Second)
+			if floor := r.e.opt.Now().Add(time.Second); next.Before(floor) {
+				next = floor
+			}
 			if r.stats.NextCheck.IsZero() || next.Before(r.stats.NextCheck) {
 				r.stats.NextCheck = next
 			}

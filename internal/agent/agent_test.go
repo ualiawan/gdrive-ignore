@@ -131,14 +131,21 @@ func TestAgentAPI(t *testing.T) {
 		t.Errorf("check: %d %v", code, out)
 	}
 
-	// Removing with deleteMirror cleans the target.
+	// A file added on the Drive side comes into the source.
+	must(os.WriteFile(filepath.Join(dst, "from-drive.txt"), []byte("d"), 0o644))
+	waitFor(t, "pull", func() bool {
+		_, err := os.Stat(filepath.Join(src, "from-drive.txt"))
+		return err == nil
+	})
+
+	// Removing a pair only stops syncing: both folders keep their files, and
+	// there is no way to make the tool delete them.
 	if code, out := c.do("DELETE", "/api/pairs/"+id+"?deleteMirror=1", nil); code != 200 {
 		t.Fatalf("delete: %d %v", code, out)
 	}
-	if _, err := os.Stat(filepath.Join(dst, "main.go")); err == nil {
-		t.Error("mirror not deleted")
-	}
-	if _, err := os.Stat(filepath.Join(src, "main.go")); err != nil {
-		t.Error("source damaged")
+	for _, p := range []string{filepath.Join(dst, "main.go"), filepath.Join(src, "main.go"), filepath.Join(src, "from-drive.txt")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s was removed", p)
+		}
 	}
 }

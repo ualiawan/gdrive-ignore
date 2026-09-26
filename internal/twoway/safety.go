@@ -81,3 +81,6 @@ func isWithin(p, dir string) bool {
 	}
 	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
+
+// HardlinkCapable reports whether files can be hardlinked between source and target.
+func HardlinkCapable(source, target string) bool { return hardlinkCapable(source, target) }

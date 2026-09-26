@@ -14,9 +14,12 @@ import (
 
 	"gdrive-ignore/internal/config"
 	"gdrive-ignore/internal/drivefs"
+	"gdrive-ignore/internal/drivelog"
 	"gdrive-ignore/internal/ignore"
-	"gdrive-ignore/internal/mirror"
+	"gdrive-ignore/internal/origin"
 	"gdrive-ignore/internal/runner"
+	"gdrive-ignore/internal/twoway"
+	"gdrive-ignore/internal/winapi"
 )
 
 // Agent owns the configuration and the running pairs.
@@ -25,6 +28,7 @@ type Agent struct {
 	log      *slog.Logger
 	onChange func()
 	changes  chan struct{}
+	tail     *drivelog.Tail
 
 	mu     sync.Mutex
 	cfg    *config.Config
@@ -37,7 +41,7 @@ type Agent struct {
 }
 
 type livePair struct {
-	eng *mirror.Engine
+	eng *twoway.Engine
 	run *runner.Runner
 	err string // setup error (e.g. source missing)
 }
@@ -45,10 +49,10 @@ type livePair struct {
 // PairView is a pair plus its live state, as shown in the UI.
 type PairView struct {
 	config.Pair
-	Status          runner.Status     `json:"status"`
-	SetupError      string            `json:"setupError,omitempty"`
-	Location        *drivefs.Location `json:"location"`
-	HardlinkCapable bool              `json:"hardlinkCapable"`
+	Status     runner.Status     `json:"status"`
+	SetupError string            `json:"setupError,omitempty"`
+	Location   *drivefs.Location `json:"location"`
+	Pending    []twoway.Pending  `json:"pending"`
 }
 
 // New loads the configuration. Call Start to begin syncing.
@@ -64,13 +68,13 @@ func New(version string, log *slog.Logger, onChange func()) (*Agent, error) {
 	if onChange == nil {
 		onChange = func() {}
 	}
-	a := &Agent{Version: version, log: log, onChange: onChange, cfg: cfg, global: global, live: map[string]*livePair{}, changes: make(chan struct{}, 1)}
+	a := &Agent{Version: version, log: log, onChange: onChange, cfg: cfg, global: global,
+		live: map[string]*livePair{}, changes: make(chan struct{}, 1), tail: drivelog.New(drivelog.LogDir())}
 	go a.deliverChanges()
 	return a, nil
 }
 
-// notify schedules an onChange call. It never blocks, so it is safe to call
-// while holding locks; bursts are coalesced.
+// notify schedules an onChange call without blocking (safe under locks).
 func (a *Agent) notify() {
 	select {
 	case a.changes <- struct{}{}:
@@ -85,8 +89,9 @@ func (a *Agent) deliverChanges() {
 	}
 }
 
-// Start launches a runner per pair.
+// Start follows Drive's log and launches a runner per pair.
 func (a *Agent) Start() {
+	a.tail.Start()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, p := range a.cfg.Pairs {
@@ -97,23 +102,24 @@ func (a *Agent) Start() {
 // Stop ends all runners.
 func (a *Agent) Stop() {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	for id := range a.live {
 		a.stopLocked(id)
 	}
+	a.mu.Unlock()
+	a.tail.Stop()
 }
 
 func (a *Agent) startLocked(p config.Pair) {
 	lp := &livePair{}
 	a.live[p.ID] = lp
-	eng, err := a.engineFor(p, config.ManifestPath(p.ID))
+	eng, err := a.engineFor(p)
 	if err != nil {
 		lp.err = err.Error()
 		a.log.Warn("pair not started", "pair", p.Name, "err", err)
 		return
 	}
 	lp.eng = eng
-	lp.run = runner.Start(eng, p.Source, runner.Options{
+	lp.run = runner.Start(eng, p.Source, p.Target, runner.Options{
 		Interval: time.Duration(a.cfg.IntervalMinutes) * time.Minute,
 		Paused:   p.Paused,
 		Log:      a.log.With("pair", p.Name),
@@ -130,7 +136,7 @@ func (a *Agent) stopLocked(id string) {
 	}
 }
 
-func (a *Agent) engineFor(p config.Pair, manifest string) (*mirror.Engine, error) {
+func (a *Agent) rules(p config.Pair) (*ignore.Set, []string) {
 	var groups [][]ignore.Rule
 	if p.UseGlobal {
 		groups = append(groups, ignore.Parse(a.global, "global rules", ""))
@@ -140,11 +146,29 @@ func (a *Agent) engineFor(p config.Pair, manifest string) (*mirror.Engine, error
 	if p.HonorGitignore {
 		files = append(files, ".gitignore")
 	}
-	return mirror.New(mirror.Options{
-		Source: p.Source, Target: p.Target, ManifestPath: manifest,
-		IgnoreFiles: files, Rules: ignore.NewSet(groups...),
-		Mode: p.Mode, Adopt: p.Adopted, Log: a.log.With("pair", p.Name),
-	})
+	return ignore.NewSet(groups...), files
+}
+
+func (a *Agent) engineFor(p config.Pair) (*twoway.Engine, error) {
+	rules, files := a.rules(p)
+	opt := twoway.Options{
+		Source: p.Source, Target: p.Target, StatePath: config.StatePath(p.ID),
+		IgnoreFiles: files, Rules: rules, Adopt: p.Adopted,
+		Log: a.log.With("pair", p.Name), Recycle: winapi.Recycle,
+		LegacyState: config.ManifestPath(p.ID),
+	}
+	// Deletions in the mirror are attributed using Drive's log and database
+	// for the computer folder that contains the target. Without one, every
+	// mirror-side deletion waits for the user.
+	if loc := a.Drive(false).Covering(p.Target); loc != nil && loc.Kind == drivefs.KindBackup && loc.Account != "" {
+		acct := loc.Account
+		opt.Classifier = &origin.Checker{
+			Log: a.tail, Account: acct,
+			RemoteDeleted: func(ids []int64) (bool, error) { return drivefs.RemoteDeleted(acct, ids) },
+		}
+		opt.DriveIDs = func() (map[uint64]int64, error) { return drivefs.MirrorInodes(acct) }
+	}
+	return twoway.New(opt)
 }
 
 // Drive returns Drive for Desktop's locations, cached for a few seconds.
@@ -164,12 +188,14 @@ func (a *Agent) Pairs() []PairView {
 	defer a.mu.Unlock()
 	out := make([]PairView, 0, len(a.cfg.Pairs))
 	for _, p := range a.cfg.Pairs {
-		v := PairView{Pair: p, Location: drive.Covering(p.Target)}
-		v.HardlinkCapable = mirror.HardlinkCapable(p.Source, p.Target)
+		v := PairView{Pair: p, Location: drive.Covering(p.Target), Pending: []twoway.Pending{}}
 		if lp := a.live[p.ID]; lp != nil {
 			v.SetupError = lp.err
 			if lp.run != nil {
 				v.Status = lp.run.Status()
+			}
+			if lp.eng != nil {
+				v.Pending = lp.eng.Pending()
 			}
 		}
 		out = append(out, v)
@@ -183,8 +209,9 @@ func (a *Agent) Summary() string {
 	if len(pairs) == 0 {
 		return "No folders set up"
 	}
-	var syncing, problems, paused int
+	var syncing, problems, paused, decisions int
 	for _, p := range pairs {
+		decisions += len(p.Pending)
 		switch {
 		case p.SetupError != "" || p.Status.State == runner.StateError || p.Status.State == runner.StateNeedsAdopt:
 			problems++
@@ -204,7 +231,10 @@ func (a *Agent) Summary() string {
 	if problems > 0 {
 		parts = append(parts, fmt.Sprintf("%d need attention", problems))
 	}
-	if syncing+paused+problems == 0 {
+	if decisions > 0 {
+		parts = append(parts, fmt.Sprintf("%d deletion(s) to confirm", decisions))
+	}
+	if syncing+paused+problems+decisions == 0 {
 		parts = append(parts, "up to date")
 	}
 	return strings.Join(parts, ", ")
@@ -212,12 +242,15 @@ func (a *Agent) Summary() string {
 
 // validate checks a pair on its own and against the other pairs.
 func (a *Agent) validate(p config.Pair) error {
-	p.Source, p.Target = filepath.Clean(p.Source), filepath.Clean(p.Target)
-	if err := mirror.Validate(p.Source, p.Target); err != nil {
+	if err := twoway.Validate(p.Source, p.Target); err != nil {
 		return err
 	}
-	if a.Drive(false).IsLocationRoot(p.Target) {
-		return errors.New("choose a subfolder inside the Drive location, not the location itself")
+	drive := a.Drive(false)
+	if drive.IsLocationRoot(p.Target) {
+		return errors.New("choose a subfolder inside the Drive folder, not the Drive folder itself")
+	}
+	if loc := drive.Covering(p.Target); loc != nil && loc.Kind == drivefs.KindStream {
+		return errors.New("the target cannot be on Google Drive's virtual drive; use a folder on this PC that Drive syncs (for example DriveMirror)")
 	}
 	for _, o := range a.cfg.Pairs {
 		if o.ID == p.ID {
@@ -250,9 +283,7 @@ func normalize(p *config.Pair) {
 	if p.Name == "" {
 		p.Name = filepath.Base(p.Source)
 	}
-	if p.Mode == "" {
-		p.Mode = mirror.ModeAuto
-	}
+	p.Mode = ""
 }
 
 // AddPair validates, saves and starts a new pair.
@@ -275,8 +306,8 @@ func (a *Agent) AddPair(p config.Pair) (config.Pair, error) {
 	return p, nil
 }
 
-// UpdatePair replaces a pair's settings and restarts it. Changing the
-// target of a pair removes the old mirror's files that the app created.
+// UpdatePair replaces a pair's settings and restarts it. Changing its
+// folders starts a fresh sync; nothing is ever deleted from the old target.
 func (a *Agent) UpdatePair(p config.Pair) error {
 	normalize(&p)
 	a.mu.Lock()
@@ -290,7 +321,8 @@ func (a *Agent) UpdatePair(p config.Pair) error {
 	}
 	old := *cur
 	p.Adopted, p.Paused = old.Adopted, old.Paused
-	if !strings.EqualFold(old.Target, p.Target) || !strings.EqualFold(old.Source, p.Source) {
+	moved := !strings.EqualFold(old.Target, p.Target) || !strings.EqualFold(old.Source, p.Source)
+	if moved {
 		p.Adopted = false
 	}
 	*cur = p
@@ -299,31 +331,21 @@ func (a *Agent) UpdatePair(p config.Pair) error {
 		return err
 	}
 	a.stopLocked(p.ID)
-	if !strings.EqualFold(old.Target, p.Target) || !strings.EqualFold(old.Source, p.Source) {
-		a.purge(old)
+	if moved {
+		forgetState(p.ID)
 	}
 	a.startLocked(p)
 	a.notify()
 	return nil
 }
 
-// purge removes what the app created for p. Errors are logged.
-func (a *Agent) purge(p config.Pair) {
-	eng, err := a.engineFor(p, config.ManifestPath(p.ID))
-	if err != nil {
-		_ = os.Remove(config.ManifestPath(p.ID))
-		return
-	}
-	if st, err := eng.Purge(); err != nil {
-		a.log.Warn("purge incomplete", "pair", p.Name, "err", err)
-	} else {
-		a.log.Info("mirror removed", "pair", p.Name, "removed", st.Removed)
-	}
+func forgetState(id string) {
+	_ = os.Remove(config.StatePath(id))
+	_ = os.Remove(config.ManifestPath(id))
 }
 
-// RemovePair stops and deletes a pair. With deleteMirror, files the app
-// created in the target are deleted; otherwise they are left in place.
-func (a *Agent) RemovePair(id string, deleteMirror bool) error {
+// RemovePair stops syncing a pair. Files in both folders are left as they are.
+func (a *Agent) RemovePair(id string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for i, p := range a.cfg.Pairs {
@@ -335,19 +357,15 @@ func (a *Agent) RemovePair(id string, deleteMirror bool) error {
 		if err := a.cfg.Save(); err != nil {
 			return err
 		}
-		if deleteMirror {
-			a.purge(p)
-		} else {
-			_ = os.Remove(config.ManifestPath(id))
-		}
-		a.log.Info("pair removed", "pair", p.Name, "deleteMirror", deleteMirror)
+		forgetState(id)
+		a.log.Info("pair removed", "pair", p.Name)
 		a.notify()
 		return nil
 	}
 	return errors.New("pair not found")
 }
 
-// Adopt allows the first sync into a non-empty target.
+// Adopt allows the first sync to merge into a non-empty target.
 func (a *Agent) Adopt(id string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -361,6 +379,24 @@ func (a *Agent) Adopt(id string) error {
 	}
 	a.stopLocked(id)
 	a.startLocked(*p)
+	return nil
+}
+
+// Decide resolves a pending deletion ("" rel = all for that pair) and syncs.
+func (a *Agent) Decide(id, rel, decision string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	lp := a.live[id]
+	if lp == nil || lp.eng == nil {
+		return errors.New("pair is not running")
+	}
+	if err := lp.eng.Decide(rel, decision); err != nil {
+		return err
+	}
+	if lp.run != nil {
+		lp.run.SyncNow()
+	}
+	a.notify()
 	return nil
 }
 
@@ -398,8 +434,8 @@ func (a *Agent) AllPaused() bool {
 	return len(a.cfg.Pairs) > 0
 }
 
-// SyncNow triggers a full pass for one pair ("" = all). Pairs that failed
-// to start (e.g. the source was missing) are restarted.
+// SyncNow triggers a pass for one pair ("" = all). Pairs that failed to
+// start are restarted.
 func (a *Agent) SyncNow(id string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -477,55 +513,32 @@ func (a *Agent) SetSettings(s Settings) error {
 
 // PreviewResult is a dry run of a (possibly unsaved) pair.
 type PreviewResult struct {
-	mirror.PreviewResult
-	Truncated       int               `json:"truncated"` // ignored entries not listed
-	HardlinkCapable bool              `json:"hardlinkCapable"`
-	Location        *drivefs.Location `json:"location"` // Drive location covering the target
-}
-
-// SuggestedRoot is a local folder for mirrors on the user's profile drive.
-// Added once to Drive as a computer folder, it allows hardlinks.
-func SuggestedRoot() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, "DriveMirror")
+	twoway.PreviewResult
+	Truncated int               `json:"truncated"`
+	Location  *drivefs.Location `json:"location"`  // Drive location covering the target
+	SameDrive bool              `json:"sameDrive"` // hardlinks possible between source and target
 }
 
 // Preview dry-runs a pair's rules against its source without writing.
 func (a *Agent) Preview(p config.Pair) (PreviewResult, error) {
 	normalize(&p)
-	tmp, err := os.MkdirTemp("", "gdrive-ignore-preview")
-	if err != nil {
-		return PreviewResult{}, err
-	}
-	defer os.RemoveAll(tmp)
-	realTarget := p.Target
-	if p.Target == "." || p.Target == "" || mirror.Validate(p.Source, p.Target) != nil {
-		p.Target = filepath.Join(tmp, "target")
-		realTarget = ""
-	}
 	a.mu.Lock()
-	eng, err := a.engineFor(p, filepath.Join(tmp, "manifest.json"))
+	rules, files := a.rules(p)
 	a.mu.Unlock()
-	if err != nil {
-		return PreviewResult{}, err
-	}
-	res, err := eng.Preview(true)
+	res, err := twoway.Preview(p.Source, files, rules, true)
 	if err != nil {
 		return PreviewResult{}, err
 	}
 	sort.Slice(res.Ignored, func(i, j int) bool { return res.Ignored[i].Size > res.Ignored[j].Size })
 	out := PreviewResult{PreviewResult: res}
-	if realTarget != "" {
-		out.HardlinkCapable = mirror.HardlinkCapable(p.Source, realTarget)
-		out.Location = a.Drive(false).Covering(realTarget)
-	}
 	const limit = 1000
 	if len(out.Ignored) > limit {
 		out.Truncated = len(out.Ignored) - limit
 		out.Ignored = out.Ignored[:limit]
+	}
+	if p.Target != "." && p.Target != "" {
+		out.Location = a.Drive(false).Covering(p.Target)
+		out.SameDrive = twoway.HardlinkCapable(p.Source, p.Target)
 	}
 	return out, nil
 }
@@ -539,19 +552,10 @@ func (a *Agent) Check(abs string) (pair string, res ignore.Result, err error) {
 			continue
 		}
 		rel, _ := filepath.Rel(p.Source, abs)
-		var loader *ignore.Loader
-		if lp := a.live[p.ID]; lp != nil && lp.eng != nil {
-			loader = lp.eng.Loader()
-		} else {
-			// Not running (e.g. CLI use): build the rules without syncing.
-			eng, err := a.engineFor(p, filepath.Join(os.TempDir(), "gdrive-ignore-check-unused.json"))
-			if err != nil {
-				return p.Name, res, err
-			}
-			loader = eng.Loader()
-		}
+		rules, files := a.rules(p)
+		l := &ignore.Loader{Root: p.Source, FileNames: files, Base: rules}
 		fi, statErr := os.Stat(abs)
-		res, err = loader.Check(filepath.ToSlash(rel), statErr == nil && fi.IsDir())
+		res, err = l.Check(filepath.ToSlash(rel), statErr == nil && fi.IsDir())
 		return p.Name, res, err
 	}
 	return "", res, errors.New("path is not inside any source folder")
@@ -560,12 +564,13 @@ func (a *Agent) Check(abs string) (pair string, res ignore.Result, err error) {
 // PairResult is the outcome of one pair in SyncOnce.
 type PairResult struct {
 	Name  string
-	Stats mirror.Stats
+	Stats twoway.Stats
 	Err   error
 }
 
-// SyncOnce runs one full pass for every unpaused pair without watching.
-// Use it only when no agent is running.
+// SyncOnce runs one pass for every unpaused pair without watching. Use it
+// only when no agent is running. Mirror-side deletions found this way have
+// no timing evidence and are left for the user.
 func (a *Agent) SyncOnce() []PairResult {
 	a.mu.Lock()
 	pairs := append([]config.Pair(nil), a.cfg.Pairs...)
@@ -576,12 +581,22 @@ func (a *Agent) SyncOnce() []PairResult {
 			continue
 		}
 		r := PairResult{Name: p.Name}
-		eng, err := a.engineFor(p, config.ManifestPath(p.ID))
+		eng, err := a.engineFor(p)
 		if err == nil {
-			r.Stats, err = eng.Reconcile("", true)
+			r.Stats, err = eng.Reconcile()
 		}
 		r.Err = err
 		out = append(out, r)
 	}
 	return out
+}
+
+// SuggestedRoot is a local folder for mirrors on the user's profile drive.
+// Added once to Drive as a computer folder, it allows hardlinks.
+func SuggestedRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "DriveMirror")
 }

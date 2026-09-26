@@ -9,8 +9,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-
-	"gdrive-ignore/internal/mirror"
 )
 
 // AppName is used for folders, the mutex and the autostart entry.
@@ -18,16 +16,16 @@ const AppName = "gdrive-ignore"
 
 // Pair is one source folder mirrored to one target folder.
 type Pair struct {
-	ID             string      `json:"id"`
-	Name           string      `json:"name"`
-	Source         string      `json:"source"`
-	Target         string      `json:"target"`
-	Rules          string      `json:"rules"`          // pair rules, one pattern per line
-	UseGlobal      bool        `json:"useGlobal"`      // apply the global rules
-	HonorGitignore bool        `json:"honorGitignore"` // also read .gitignore files
-	Mode           mirror.Mode `json:"mode"`           // auto, hardlink or copy
-	Paused         bool        `json:"paused"`
-	Adopted        bool        `json:"adopted"` // user allowed syncing into a non-empty target
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Source         string `json:"source"`
+	Target         string `json:"target"`
+	Rules          string `json:"rules"`          // pair rules, one pattern per line
+	UseGlobal      bool   `json:"useGlobal"`      // apply the global rules
+	HonorGitignore bool   `json:"honorGitignore"` // also read .gitignore files
+	Mode           string `json:"mode,omitempty"` // v1 only (auto/hardlink/copy); ignored since v2
+	Paused         bool   `json:"paused"`
+	Adopted        bool   `json:"adopted"` // user allowed syncing into a non-empty target
 }
 
 // Config is the persisted app configuration.
@@ -83,7 +81,8 @@ func Path() string { return filepath.Join(Dir(), "config.json") }
 // GlobalRulesPath is the global ignore file, editable in any text editor.
 func GlobalRulesPath() string { return filepath.Join(Dir(), "global.driveignore") }
 
-// ManifestPath is where a pair's engine records what it owns.
+// ManifestPath is the v1 (one-way) manifest; its presence marks a pair as
+// already adopted when migrating to v2.
 func ManifestPath(id string) string { return filepath.Join(LocalDir(), "state", id+".json") }
 
 // LogDir holds agent logs.
@@ -162,3 +161,7 @@ func writeAtomic(path string, b []byte) error {
 	}
 	return os.Rename(tmp, path)
 }
+
+// StatePath is where a pair's two-way sync state (baseline and pending
+// decisions) is kept.
+func StatePath(id string) string { return filepath.Join(LocalDir(), "state", id+".v2.json") }

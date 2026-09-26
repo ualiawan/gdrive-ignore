@@ -34,7 +34,7 @@ func TestWatchReportsNestedChanges(t *testing.T) {
 	for missing := len(want); missing > 0; {
 		select {
 		case batch := <-w.C:
-			for _, p := range batch {
+			for _, p := range batch.Paths {
 				if seen, ok := want[p]; ok && !seen {
 					want[p] = true
 					missing--

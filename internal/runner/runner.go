@@ -1,20 +1,19 @@
-// Package runner keeps one pair in sync: it watches the source, turns
-// change events into targeted reconcile jobs and runs periodic full passes.
+// Package runner keeps one pair in sync: it watches both the source and the
+// mirror, runs a two-way pass shortly after changes settle, and rescans
+// periodically as a safety net.
 package runner
 
 import (
 	"errors"
 	"log/slog"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime/debug"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"gdrive-ignore/internal/mirror"
+	"gdrive-ignore/internal/twoway"
 	"gdrive-ignore/internal/watch"
 )
 
@@ -32,46 +31,43 @@ const (
 
 // Status is a snapshot for the UI.
 type Status struct {
-	State    State        `json:"state"`
-	Mode     mirror.Mode  `json:"mode"`
-	Watching bool         `json:"watching"`
-	LastSync time.Time    `json:"lastSync"`
-	LastFull time.Time    `json:"lastFull"`
-	Full     mirror.Stats `json:"full"`   // last full pass: totals
-	Recent   mirror.Stats `json:"recent"` // last incremental pass
-	Error    string       `json:"error"`
-	Pending  int          `json:"pending"`
+	State      State        `json:"state"`
+	Watching   bool         `json:"watching"`
+	LastSync   time.Time    `json:"lastSync"`
+	Last       twoway.Stats `json:"last"`       // most recent pass (totals + actions)
+	Activity   twoway.Stats `json:"activity"`   // most recent pass that changed something
+	ActivityAt time.Time    `json:"activityAt"` //
+	Error      string       `json:"error"`
 }
 
 // Options tune a Runner. Zero values get sensible defaults.
 type Options struct {
-	Interval time.Duration // full pass interval (default 15m)
-	Debounce time.Duration // quiet time before syncing events (default 500ms)
-	MaxWait  time.Duration // max delay for a busy tree (default 3s)
-	MaxJobs  int           // above this, do a full pass instead (default 200)
+	Interval time.Duration // full rescan interval (default 15m)
+	Debounce time.Duration // quiet time before syncing (default 500ms)
+	MaxWait  time.Duration // max delay while changes keep coming (default 3s)
 	Paused   bool
 	Log      *slog.Logger
-	OnChange func() // called after every status change
+	OnChange func()
 }
 
 // Runner drives one Engine.
 type Runner struct {
-	eng    *mirror.Engine
-	source string
-	opt    Options
+	eng            *twoway.Engine
+	source, target string
+	opt            Options
 
 	mu     sync.Mutex
 	st     Status
 	paused bool
 
-	full   chan struct{}
+	kick   chan struct{}
 	resume chan struct{}
 	stop   chan struct{}
 	done   chan struct{}
 }
 
 // Start begins watching and syncing. Call Stop to end it.
-func Start(eng *mirror.Engine, source string, opt Options) *Runner {
+func Start(eng *twoway.Engine, source, target string, opt Options) *Runner {
 	if opt.Interval <= 0 {
 		opt.Interval = 15 * time.Minute
 	}
@@ -81,16 +77,13 @@ func Start(eng *mirror.Engine, source string, opt Options) *Runner {
 	if opt.MaxWait <= 0 {
 		opt.MaxWait = 3 * time.Second
 	}
-	if opt.MaxJobs <= 0 {
-		opt.MaxJobs = 200
-	}
 	if opt.Log == nil {
 		opt.Log = slog.Default()
 	}
 	r := &Runner{
-		eng: eng, source: source, opt: opt, paused: opt.Paused,
-		st:     Status{State: StateStarting, Mode: eng.Mode()},
-		full:   make(chan struct{}, 1),
+		eng: eng, source: source, target: target, opt: opt, paused: opt.Paused,
+		st:     Status{State: StateStarting},
+		kick:   make(chan struct{}, 1),
 		resume: make(chan struct{}, 1),
 		stop:   make(chan struct{}),
 		done:   make(chan struct{}),
@@ -109,15 +102,16 @@ func (r *Runner) Status() Status {
 	return r.st
 }
 
-// SyncNow requests a full pass.
+// SyncNow requests a pass.
 func (r *Runner) SyncNow() {
 	select {
-	case r.full <- struct{}{}:
+	case r.kick <- struct{}{}:
 	default:
 	}
 }
 
-// SetPaused pauses or resumes syncing. Events keep being collected.
+// SetPaused pauses or resumes syncing. Changes are still noticed (and
+// mirror deletions timestamped) while paused.
 func (r *Runner) SetPaused(p bool) {
 	r.mu.Lock()
 	r.paused = p
@@ -165,51 +159,58 @@ func (r *Runner) changed() {
 	}
 }
 
-// job is one reconcile call.
-type job struct {
-	rel       string
-	recursive bool
+// side is one watched folder.
+type side struct {
+	root   string
+	mirror bool
+	w      *watch.Watcher
+	c      <-chan watch.Batch
+	errc   <-chan error
+	retry  <-chan time.Time
+}
+
+func (r *Runner) startWatch(s *side) {
+	w, err := watch.New(s.root)
+	if err != nil {
+		r.opt.Log.Warn("watch failed, relying on periodic sync", "folder", s.root, "err", err)
+		s.w, s.c, s.errc = nil, nil, nil
+		if !errors.Is(err, watch.ErrUnsupported) {
+			s.retry = time.After(30 * time.Second)
+		}
+		return
+	}
+	s.w, s.c, s.errc, s.retry = w, w.C, w.Err, nil
 }
 
 func (r *Runner) loop() {
 	defer close(r.done)
-	var (
-		w          *watch.Watcher
-		watchC     <-chan []string
-		watchErr   <-chan error
-		retryWatch <-chan time.Time
-		jobs       = map[string]bool{} // rel -> recursive
-		needFull   = true
-		first      time.Time
-		debounce   *time.Timer
-		debounceC  <-chan time.Time
-	)
-	startWatch := func() {
-		var err error
-		w, err = watch.New(r.source)
-		if err != nil {
-			r.opt.Log.Warn("watch failed, relying on periodic sync", "source", r.source, "err", err)
-			w, watchC, watchErr = nil, nil, nil
-			if !errors.Is(err, watch.ErrUnsupported) {
-				retryWatch = time.After(30 * time.Second)
-			}
-			r.update(func(s *Status) { s.Watching = false })
-			return
-		}
-		watchC, watchErr, retryWatch = w.C, w.Err, nil
-		r.update(func(s *Status) { s.Watching = true })
-	}
-	startWatch()
+	src := &side{root: r.source}
+	dst := &side{root: r.target, mirror: true}
+	_ = os.MkdirAll(r.target, 0o755)
+	r.startWatch(src)
+	r.startWatch(dst)
 	defer func() {
-		if w != nil {
-			w.Close()
+		for _, s := range []*side{src, dst} {
+			if s.w != nil {
+				s.w.Close()
+			}
 		}
 	}()
+	watching := func() bool { return src.w != nil && dst.w != nil }
+	r.update(func(s *Status) { s.Watching = watching() })
 
 	ticker := time.NewTicker(r.opt.Interval)
 	defer ticker.Stop()
-
+	var (
+		pending   bool
+		first     time.Time
+		debounce  *time.Timer
+		debounceC <-chan time.Time
+		recheck   *time.Timer
+		recheckC  <-chan time.Time
+	)
 	schedule := func() {
+		pending = true
 		now := time.Now()
 		if first.IsZero() {
 			first = now
@@ -225,199 +226,133 @@ func (r *Runner) loop() {
 		}
 		debounceC = debounce.C
 	}
-
 	run := func() {
 		if r.isPaused() {
-			r.update(func(s *Status) { s.Pending = len(jobs) })
 			return
 		}
-		first, debounceC = time.Time{}, nil
-		if needFull || len(jobs) > r.opt.MaxJobs {
-			clear(jobs)
-			needFull = false
-			r.runFull()
-			return
+		pending, first, debounceC = false, time.Time{}, nil
+		next := r.pass()
+		if !next.IsZero() {
+			d := time.Until(next)
+			if recheck == nil {
+				recheck = time.NewTimer(d)
+			} else {
+				recheck.Reset(d)
+			}
+			recheckC = recheck.C
 		}
-		list := coalesce(jobs)
-		clear(jobs)
-		r.runJobs(list)
 	}
 
-	run() // initial full pass
+	handle := func(s *side, b watch.Batch) {
+		relevant := s.w != nil && s.w.TakeOverflow()
+		for _, p := range b.Paths {
+			if r.eng.InIgnoredDir(p) {
+				continue
+			}
+			abs := filepath.Join(s.root, filepath.FromSlash(p))
+			fi, err := os.Lstat(abs)
+			if err == nil && fi.IsDir() && r.eng.IsIgnoredDir(p) {
+				continue // content changed inside an ignored folder
+			}
+			if s.mirror && errors.Is(err, os.ErrNotExist) {
+				r.eng.NoteGone(p, b.Time)
+			}
+			relevant = true
+		}
+		if relevant {
+			schedule()
+		}
+	}
+
+	run() // initial pass
 	for {
 		select {
 		case <-r.stop:
 			return
-		case batch, ok := <-watchC:
+		case b, ok := <-src.c:
 			if !ok {
-				watchC = nil
+				src.c = nil
 				continue
 			}
-			if w.TakeOverflow() {
-				needFull = true
+			handle(src, b)
+		case b, ok := <-dst.c:
+			if !ok {
+				dst.c = nil
+				continue
 			}
-			for _, p := range batch {
-				r.addJobs(jobs, p)
-			}
-			if needFull || len(jobs) > 0 {
-				schedule()
-			}
-		case err := <-watchErr:
-			r.opt.Log.Warn("watcher stopped", "source", r.source, "err", err)
-			w.Close()
-			w, watchC, watchErr = nil, nil, nil
-			needFull = true
-			retryWatch = time.After(30 * time.Second)
+			handle(dst, b)
+		case err := <-src.errc:
+			r.watchFailed(src, err)
 			r.update(func(s *Status) { s.Watching = false })
-		case <-retryWatch:
-			startWatch()
-			if w != nil {
-				needFull = true
-				run()
-			}
+			schedule()
+		case err := <-dst.errc:
+			r.watchFailed(dst, err)
+			r.update(func(s *Status) { s.Watching = false })
+			schedule()
+		case <-src.retry:
+			r.startWatch(src)
+			r.update(func(s *Status) { s.Watching = watching() })
+			schedule()
+		case <-dst.retry:
+			r.startWatch(dst)
+			r.update(func(s *Status) { s.Watching = watching() })
+			schedule()
 		case <-debounceC:
 			run()
-		case <-ticker.C:
-			needFull = true
+		case <-recheckC:
+			recheckC = nil
 			run()
-		case <-r.full:
-			needFull = true
+		case <-ticker.C:
+			run()
+		case <-r.kick:
 			run()
 		case <-r.resume:
-			if needFull || len(jobs) > 0 {
+			if pending {
 				run()
 			}
 		}
 	}
 }
 
-// addJobs turns a changed path into reconcile jobs.
-func (r *Runner) addJobs(jobs map[string]bool, p string) {
-	if p == "" || r.eng.InIgnoredDir(p) {
-		return
+func (r *Runner) watchFailed(s *side, err error) {
+	r.opt.Log.Warn("watcher stopped", "folder", s.root, "err", err)
+	if s.w != nil {
+		s.w.Close()
 	}
-	parent := path.Dir(p)
-	if parent == "." {
-		parent = ""
-	}
-	name := path.Base(p)
-	add := func(rel string, rec bool) {
-		jobs[rel] = jobs[rel] || rec
-	}
-	fi, err := os.Lstat(filepath.Join(r.source, filepath.FromSlash(p)))
-	isDir := err == nil && fi.IsDir()
-	if isDir && r.eng.IsIgnoredDir(p) {
-		// Content changes inside an ignored folder touch the folder itself.
-		return
-	}
-	add(parent, false)
-	if r.eng.Loader().IsIgnoreFile(name) {
-		add(parent, true)
-		return
-	}
-	if isDir {
-		// A new or renamed folder: sync everything inside it.
-		add(p, true)
-	}
+	s.w, s.c, s.errc = nil, nil, nil
+	s.retry = time.After(30 * time.Second)
 }
 
-// coalesce drops jobs covered by a recursive job on a strict ancestor.
-func coalesce(jobs map[string]bool) []job {
-	var recs []string
-	for rel, rec := range jobs {
-		if rec {
-			recs = append(recs, rel)
-		}
-	}
-	var out []job
-	for rel, rec := range jobs {
-		if !coveredByAncestor(recs, rel) {
-			out = append(out, job{rel, rec})
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].rel < out[j].rel })
-	return out
-}
-
-// coveredByAncestor reports whether a strict ancestor of rel is in recs.
-func coveredByAncestor(recs []string, rel string) bool {
-	if rel == "" {
-		return false
-	}
-	lr := strings.ToLower(rel)
-	for _, a := range recs {
-		la := strings.ToLower(a)
-		if la != lr && (a == "" || strings.HasPrefix(lr, la+"/")) {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *Runner) runFull() {
-	r.update(func(s *Status) { s.State = StateSyncing; s.Pending = 0 })
-	st, err := r.eng.Reconcile("", true)
-	// A full pass allocates per file; hand that memory back to Windows so the
-	// idle agent stays small.
+// pass runs one two-way pass and returns when to check again for waiting
+// deletions (zero if none).
+func (r *Runner) pass() time.Time {
+	r.update(func(s *Status) { s.State = StateSyncing })
+	st, err := r.eng.Reconcile()
 	defer debug.FreeOSMemory()
 	now := time.Now()
 	r.update(func(s *Status) {
-		s.Mode = r.eng.Mode()
-		s.Pending = 0
 		switch {
-		case errors.Is(err, mirror.ErrTargetNotEmpty):
+		case errors.Is(err, twoway.ErrTargetNotEmpty):
 			s.State, s.Error = StateNeedsAdopt, err.Error()
 			return
 		case err != nil:
 			s.State, s.Error = StateError, err.Error()
 			return
 		}
-		s.Full, s.LastFull, s.LastSync = st, now, now
+		s.Last, s.LastSync = st, now
+		if st.Changed() {
+			s.Activity, s.ActivityAt = st, now
+		}
 		s.State, s.Error = StateIdle, ""
 		if st.ErrorCount > 0 {
 			s.Error = strings.Join(st.Errors, "; ")
 		}
 	})
-	if st.Changed() || err != nil {
-		r.opt.Log.Info("full sync", "source", r.source, "linked", st.Linked, "copied", st.Copied,
-			"touched", st.Touched, "removed", st.Removed, "errors", st.ErrorCount, "took", st.Duration, "err", err)
+	if st.Changed() || st.ErrorCount > 0 || err != nil {
+		r.opt.Log.Info("sync", "source", r.source,
+			"pushed", st.Pushed, "pulled", st.Pulled, "renamed", st.Renamed, "conflicts", st.Conflicts,
+			"deletedInDrive", st.DeletedInDrive, "deletedHere", st.DeletedHere, "restored", st.Restored,
+			"pending", st.Pending, "errors", st.ErrorCount, "took", st.Duration, "err", err)
 	}
-}
-
-func (r *Runner) runJobs(list []job) {
-	r.update(func(s *Status) { s.State = StateSyncing })
-	var total mirror.Stats
-	var firstErr error
-	for _, j := range list {
-		st, err := r.eng.Reconcile(j.rel, j.recursive)
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-		total.Linked += st.Linked
-		total.Copied += st.Copied
-		total.Touched += st.Touched
-		total.Renamed += st.Renamed
-		total.Removed += st.Removed
-		total.DirsCreated += st.DirsCreated
-		total.ErrorCount += st.ErrorCount
-		total.Errors = append(total.Errors, st.Errors...)
-		total.Duration += st.Duration
-	}
-	now := time.Now()
-	r.update(func(s *Status) {
-		s.Mode = r.eng.Mode()
-		s.Recent, s.LastSync, s.Pending = total, now, 0
-		s.State, s.Error = StateIdle, ""
-		if errors.Is(firstErr, mirror.ErrTargetNotEmpty) {
-			s.State, s.Error = StateNeedsAdopt, firstErr.Error()
-		} else if firstErr != nil {
-			s.State, s.Error = StateError, firstErr.Error()
-		} else if total.ErrorCount > 0 {
-			s.Error = strings.Join(total.Errors, "; ")
-		}
-	})
-	if total.Changed() || total.ErrorCount > 0 {
-		r.opt.Log.Info("sync", "source", r.source, "jobs", len(list), "linked", total.Linked, "copied", total.Copied,
-			"touched", total.Touched, "removed", total.Removed, "errors", total.ErrorCount)
-	}
+	return st.NextCheck
 }
