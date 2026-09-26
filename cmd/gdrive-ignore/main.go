@@ -131,6 +131,10 @@ func runAgent(background, wait bool) error {
 	go func() {
 		for i := 0; i < 60; i++ {
 			err := os.Remove(exePath() + ".old")
+			com := strings.TrimSuffix(exePath(), ".exe") + ".com.old"
+			if cerr := os.Remove(com); cerr != nil && !errors.Is(cerr, os.ErrNotExist) {
+				err = cerr
+			}
 			if err == nil || errors.Is(err, os.ErrNotExist) {
 				return
 			}
@@ -220,10 +224,12 @@ func runUI() error {
 	return nil
 }
 
-// reconnectURL is called by an open window that lost its agent; it returns
-// the address of the current (possibly newly started) agent.
+// reconnectURL is called by an open window that lost its agent (e.g. after an
+// upgrade restarted it on a new port); it returns the running agent's address.
+// It never starts an agent itself: after Quit or an uninstall, an open window
+// must not bring the app back.
 func reconnectURL() (string, error) {
-	rt, err := ensureAgent()
+	rt, err := liveAgent()
 	if err != nil {
 		return "", err
 	}
@@ -490,6 +496,9 @@ func cmdInstall() error {
 }
 
 func cmdUninstall(purge bool) error {
+	// Close the window first: it keeps the exe open, which would stop the
+	// program folder from being removed.
+	ui.CloseExisting()
 	if rt, err := liveAgent(); err == nil {
 		_, _ = call(rt, "POST", "quit", nil, nil)
 		time.Sleep(800 * time.Millisecond)
