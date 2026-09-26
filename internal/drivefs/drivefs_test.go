@@ -7,7 +7,7 @@ import (
 )
 
 func TestParseSyncTargets(t *testing.T) {
-	// Captured from a real install: account 100000000000000000001 on G:.
+	// Format captured from a real install (account ID replaced): account on G:.
 	b, _ := hex.DecodeString("0A1D0A170A153130303030303030303030303030303030303030311202473A")
 	got := parseSyncTargets(b)
 	if len(got) != 1 || got[0].account != "100000000000000000001" || got[0].mount != "G:" {

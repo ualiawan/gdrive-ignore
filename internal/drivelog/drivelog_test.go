@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Lines captured from a real Drive for Desktop log (2026-09-26).
+// Lines captured from a real Drive for Desktop log (2026-09-26), account ID replaced.
 const (
 	acct         = "100000000000000000001"
 	downloadLine = "2026-09-26T20:13:59.714ZI [36628:mirror_100000000000000000001_COM] cloud_subsystem.cc:192:OnChangeNotificationReceived Generated 1 download events from 1 changelog entries"
