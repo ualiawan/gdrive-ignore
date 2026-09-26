@@ -205,3 +205,58 @@ func MessageBox(title, text string) {
 	defer runtime.KeepAlive(&s)
 	procMessageBox.Call(0, s.str(text), s.str(title), 0x40) // MB_ICONINFORMATION
 }
+
+var procSHFileOperation = shell32.NewProc("SHFileOperationW")
+
+// shFileOpStruct mirrors SHFILEOPSTRUCTW.
+type shFileOpStruct struct {
+	hwnd                  uintptr
+	wFunc                 uint32
+	pFrom                 *uint16
+	pTo                   *uint16
+	fFlags                uint16
+	fAnyOperationsAborted int32
+	hNameMappings         uintptr
+	lpszProgressTitle     *uint16
+}
+
+// Recycle moves a file or folder to the Recycle Bin. If Windows cannot
+// recycle it (e.g. too large for the bin), it asks the user instead of
+// deleting it permanently without warning.
+func Recycle(path string) error {
+	const (
+		foDelete           = 0x3
+		fofSilent          = 0x4
+		fofNoConfirmation  = 0x10
+		fofAllowUndo       = 0x40
+		fofNoErrorUI       = 0x400
+		fofWantNukeWarning = 0x4000
+	)
+	// pFrom must be double-NUL terminated.
+	from, err := windows.UTF16FromString(path)
+	if err != nil {
+		return err
+	}
+	from = append(from, 0)
+	op := shFileOpStruct{
+		wFunc:  foDelete,
+		pFrom:  &from[0],
+		fFlags: fofAllowUndo | fofNoConfirmation | fofSilent | fofNoErrorUI | fofWantNukeWarning,
+	}
+	var r uintptr
+	err = withCOM(func() error {
+		r, _, _ = procSHFileOperation.Call(uintptr(unsafe.Pointer(&op)))
+		return nil
+	})
+	runtime.KeepAlive(from)
+	if err != nil {
+		return err
+	}
+	if r != 0 {
+		return fmt.Errorf("moving %s to the Recycle Bin failed (code 0x%X)", path, r)
+	}
+	if op.fAnyOperationsAborted != 0 {
+		return fmt.Errorf("moving %s to the Recycle Bin was cancelled", path)
+	}
+	return nil
+}

@@ -2,6 +2,7 @@ package drivefs
 
 import (
 	"encoding/hex"
+	"errors"
 	"testing"
 )
 
@@ -39,5 +40,34 @@ func TestDiscoverLive(t *testing.T) {
 	t.Logf("installed=%v running=%v warnings=%v", info.Installed, info.Running, info.Warnings)
 	for _, l := range info.Locations {
 		t.Logf("  %-6s %-40s %s exists=%v", l.Kind, l.Path, l.Label, l.Exists)
+	}
+}
+
+// TestItemsLive reads this machine's Drive databases (read-only) if present.
+func TestItemsLive(t *testing.T) {
+	info := Discover()
+	var acct string
+	for _, l := range info.Locations {
+		if l.Kind == KindBackup && l.Account != "" {
+			acct = l.Account
+		}
+	}
+	if acct == "" {
+		t.Skip("no computer folder configured in Drive")
+	}
+	m, err := MirrorInodes(acct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("mirror items: %d", len(m))
+	var ids []int64
+	for _, id := range m {
+		ids = append(ids, id)
+		break
+	}
+	del, err := RemoteDeleted(acct, ids)
+	t.Logf("first item remote-deleted=%v err=%v", del, err)
+	if _, err := RemoteDeleted(acct, []int64{-12345}); !errors.Is(err, ErrUnknownItem) {
+		t.Errorf("unknown id: %v", err)
 	}
 }

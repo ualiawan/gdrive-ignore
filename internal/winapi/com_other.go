@@ -34,3 +34,6 @@ func Open(path string) error {
 
 // MessageBox is a no-op outside Windows for now.
 func MessageBox(title, text string) {}
+
+// Recycle is not implemented outside Windows yet; it refuses rather than deletes.
+func Recycle(path string) error { return errUnsupported }
