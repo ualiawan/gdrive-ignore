@@ -490,7 +490,7 @@ func (r *run) syncFile(rel string, src fs.FileInfo, te fs.DirEntry, exists bool)
 			exists = false
 		}
 	}
-	unchanged := exists && tinfo.Size() == src.Size() && tinfo.ModTime().Equal(src.ModTime())
+	unchanged := exists && tinfo.Size() == src.Size() && sameMTime(src.ModTime(), tinfo.ModTime())
 
 	if e.mode == ModeHardlink {
 		if unchanged {
@@ -774,6 +774,23 @@ func copyFile(src, dst string, mtime time.Time) error {
 		return err
 	}
 	return os.Chtimes(dst, mtime, mtime)
+}
+
+// sameMTime reports whether a target mtime equals the source mtime, allowing
+// for target file systems that store coarser times than NTFS's 100 ns: Drive's
+// virtual drive keeps milliseconds, FAT/exFAT keep 10 ms or 2 s. We always set
+// the target's mtime from the source, so the target holds the source time
+// truncated or rounded to its precision; a real change won't land on that.
+func sameMTime(src, dst time.Time) bool {
+	if src.Equal(dst) {
+		return true
+	}
+	for _, g := range []time.Duration{time.Microsecond, time.Millisecond, 10 * time.Millisecond, time.Second, 2 * time.Second} {
+		if src.Truncate(g).Equal(dst) || src.Round(g).Equal(dst) {
+			return true
+		}
+	}
+	return false
 }
 
 // touch sets dst's times through its own path so change notifications fire

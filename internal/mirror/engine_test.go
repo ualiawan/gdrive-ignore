@@ -467,3 +467,24 @@ func TestCopyModeUsesNoTempFiles(t *testing.T) {
 	f.sync(e)
 	f.wantTree("a.txt")
 }
+
+func TestSameMTime(t *testing.T) {
+	src := time.Date(2026, 9, 25, 8, 26, 0, 842149800, time.UTC)
+	cases := []struct {
+		dst  time.Time
+		want bool
+	}{
+		{src, true},
+		{time.Date(2026, 9, 25, 8, 26, 0, 842000000, time.UTC), true}, // Drive virtual drive: ms truncated
+		{time.Date(2026, 9, 25, 8, 26, 0, 840000000, time.UTC), true}, // 10 ms
+		{time.Date(2026, 9, 25, 8, 26, 0, 0, time.UTC), true},         // 2 s (FAT) truncated
+		{time.Date(2026, 9, 25, 8, 26, 2, 0, time.UTC), false},        // 2 s rounding goes to :00, not :02
+		{time.Date(2026, 9, 25, 8, 26, 0, 841000000, time.UTC), false}, // 1 ms off: a real change
+		{src.Add(time.Second), false},
+	}
+	for _, c := range cases {
+		if got := sameMTime(src, c.dst); got != c.want {
+			t.Errorf("sameMTime(%v, %v) = %v, want %v", src, c.dst, got, c.want)
+		}
+	}
+}

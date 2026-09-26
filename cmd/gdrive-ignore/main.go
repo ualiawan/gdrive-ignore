@@ -123,6 +123,8 @@ func runAgent(background, wait bool) error {
 	logger, closeLog := openLog()
 	defer closeLog()
 	logger.Info("starting", "version", version, "exe", exePath())
+	// Left behind when an install replaced the running exe.
+	_ = os.Remove(exePath() + ".old")
 
 	a, err := agent.New(version, logger, tray.Refresh)
 	if err != nil {
