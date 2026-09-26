@@ -96,7 +96,24 @@ async function refresh(force) {
     renderDrive();
     renderPairs();
   } catch (e) {
-    $("#pairs").replaceChildren(h("div", { class: "note bad" }, "Lost connection to gdrive-ignore: " + e.message));
+    $("#pairs").replaceChildren(h("div", { class: "note bad" }, "Lost connection to gdrive-ignore, reconnecting…"));
+    reconnect();
+  }
+}
+
+// The agent restarted (e.g. after an upgrade) on a new port: ask the app
+// window for the new address and move there.
+let reconnecting = false;
+async function reconnect() {
+  if (reconnecting || !window.reconnect) return;
+  reconnecting = true;
+  try {
+    const url = await window.reconnect();
+    if (url && !url.startsWith(location.origin + "/")) location.href = url;
+  } catch (e) {
+    // Try again on the next refresh tick.
+  } finally {
+    reconnecting = false;
   }
 }
 

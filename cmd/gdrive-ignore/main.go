@@ -123,8 +123,17 @@ func runAgent(background, wait bool) error {
 	logger, closeLog := openLog()
 	defer closeLog()
 	logger.Info("starting", "version", version, "exe", exePath())
-	// Left behind when an install replaced the running exe.
-	_ = os.Remove(exePath() + ".old")
+	// Left behind when an install replaced the running exe. The old version
+	// may still be exiting (or its window still open), so retry for a while.
+	go func() {
+		for i := 0; i < 60; i++ {
+			err := os.Remove(exePath() + ".old")
+			if err == nil || errors.Is(err, os.ErrNotExist) {
+				return
+			}
+			time.Sleep(5 * time.Second)
+		}
+	}()
 
 	a, err := agent.New(version, logger, tray.Refresh)
 	if err != nil {
@@ -134,6 +143,7 @@ func runAgent(background, wait bool) error {
 	_, err = a.Serve(web.Assets(), agent.Hooks{
 		Quit: tray.Quit,
 		Install: func() error {
+			ui.CloseExisting()
 			if err := install.Install(version); err != nil {
 				return err
 			}
@@ -199,12 +209,22 @@ func runUI() error {
 	if err != nil {
 		return err
 	}
-	if err := ui.Run(rt.URL()); errors.Is(err, ui.ErrNoWebView) {
+	if err := ui.Run(rt.URL(), reconnectURL); errors.Is(err, ui.ErrNoWebView) {
 		return ui.OpenInBrowser(rt.URL())
 	} else if err != nil {
 		return err
 	}
 	return nil
+}
+
+// reconnectURL is called by an open window that lost its agent; it returns
+// the address of the current (possibly newly started) agent.
+func reconnectURL() (string, error) {
+	rt, err := ensureAgent()
+	if err != nil {
+		return "", err
+	}
+	return rt.URL(), nil
 }
 
 // ensureAgent returns the running agent, starting one if needed.
@@ -451,6 +471,7 @@ func cmdInstall() error {
 		_, _ = call(rt, "POST", "quit", nil, nil)
 		time.Sleep(500 * time.Millisecond)
 	}
+	ui.CloseExisting()
 	if err := install.Install(version); err != nil {
 		return err
 	}
