@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -356,6 +357,9 @@ func coveredByAncestor(recs []string, rel string) bool {
 func (r *Runner) runFull() {
 	r.update(func(s *Status) { s.State = StateSyncing; s.Pending = 0 })
 	st, err := r.eng.Reconcile("", true)
+	// A full pass allocates per file; hand that memory back to Windows so the
+	// idle agent stays small.
+	defer debug.FreeOSMemory()
 	now := time.Now()
 	r.update(func(s *Status) {
 		s.Mode = r.eng.Mode()

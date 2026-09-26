@@ -18,6 +18,9 @@ func Validate(source, target string) error {
 	}
 	fi, err := os.Stat(source)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("source folder does not exist: %s", source)
+		}
 		return fmt.Errorf("source folder: %w", err)
 	}
 	if !fi.IsDir() {

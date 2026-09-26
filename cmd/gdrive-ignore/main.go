@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -123,6 +124,8 @@ func runAgent(background, wait bool) error {
 	logger, closeLog := openLog()
 	defer closeLog()
 	logger.Info("starting", "version", version, "exe", exePath())
+	// A tray app should stay small: collect garbage more eagerly than the default.
+	debug.SetGCPercent(50)
 	// Left behind when an install replaced the running exe. The old version
 	// may still be exiting (or its window still open), so retry for a while.
 	go func() {
