@@ -4,7 +4,7 @@ Exclude files and folders from **Google Drive for Desktop** sync with `.gitignor
 
 Drive for Desktop has no exclude setting. gdrive-ignore keeps a **filtered mirror** of each folder you choose inside a location that Drive syncs, leaving out everything your rules ignore. Drive then uploads the mirror as usual.
 
-- Single self-contained `.exe` (~12 MB), no admin rights, no runtime to install
+- Single self-contained `.exe` (~14 MB), no admin rights, no runtime to install
 - No Google account access or credentials; it only works with local folders
 - Changes are mirrored within about a second (recursive file watching), with a periodic full rescan as a safety net
 - No extra disk space when the mirror is on the same drive as the source (NTFS hardlinks)
@@ -61,7 +61,7 @@ It runs from the tray. Close the window any time; syncing continues in the backg
 
 ## Command line
 
-The same exe works as a CLI:
+Installing adds the app folder to your user `PATH` with a small console launcher (`gdrive-ignore.com`), so the commands work in any new terminal, including PowerShell:
 
 ```
 gdrive-ignore status                 show folders and their state

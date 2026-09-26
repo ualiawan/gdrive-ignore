@@ -31,6 +31,10 @@ if ($LASTEXITCODE -ne 0) { throw "go-winres failed" }
 
 New-Item -ItemType Directory -Force dist | Out-Null
 $env:CGO_ENABLED = "0"
+# Console launcher, embedded into the main exe and installed as gdrive-ignore.com.
+go build -trimpath -ldflags "-s -w" -o internal/assets/cli/gdrive-ignore.com ./cmd/gdrive-ignore-cli
+if ($LASTEXITCODE -ne 0) { throw "launcher build failed" }
+Copy-Item internal/assets/cli/gdrive-ignore.com dist/gdrive-ignore.com
 go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$Version" -o dist/gdrive-ignore.exe ./cmd/gdrive-ignore
 if ($LASTEXITCODE -ne 0) { throw "go build failed" }
 

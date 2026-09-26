@@ -11,3 +11,6 @@ PROGRESS.md
 # editor
 .vscode/
 .idea/
+
+# generated console launcher
+/internal/assets/cli/gdrive-ignore.com

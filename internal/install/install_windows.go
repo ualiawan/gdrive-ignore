@@ -11,9 +11,12 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"unsafe"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
+	"gdrive-ignore/internal/assets"
 	"gdrive-ignore/internal/config"
 	"gdrive-ignore/internal/winapi"
 )
@@ -64,6 +67,18 @@ func Install(version string) error {
 		}
 	}
 	exe := ExePath()
+	if launcher := assets.CLILauncher(); launcher != nil {
+		// Replacing a running launcher fails; it is tiny, so rename it away.
+		com := filepath.Join(Dir(), config.AppName+".com")
+		_ = os.Remove(com + ".old")
+		_ = os.Rename(com, com+".old")
+		if err := os.WriteFile(com, launcher, 0o755); err != nil {
+			return fmt.Errorf("writing command-line launcher: %w", err)
+		}
+		if err := addToPath(Dir()); err != nil {
+			return fmt.Errorf("adding to PATH: %w", err)
+		}
+	}
 	if err := winapi.CreateShortcut(winapi.Shortcut{
 		Path: shortcutPath(), Target: exe, WorkDir: Dir(),
 		Description: "Choose what Google Drive syncs", Icon: exe,
@@ -137,6 +152,9 @@ func copyExe(src, dst string) error {
 func Uninstall(purge bool) error {
 	var errs []error
 	_ = SetAutostart(false)
+	if err := removeFromPath(Dir()); err != nil {
+		errs = append(errs, err)
+	}
 	if err := os.Remove(shortcutPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		errs = append(errs, err)
 	}
@@ -193,4 +211,76 @@ func SetAutostart(on bool) error {
 		}
 	}
 	return k.SetStringValue(config.AppName, `"`+exe+`" --background`)
+}
+
+const envKey = `Environment`
+
+// addToPath appends dir to the user's PATH if missing.
+func addToPath(dir string) error {
+	return editPath(func(parts []string) []string {
+		for _, p := range parts {
+			if strings.EqualFold(strings.TrimRight(p, `\`), strings.TrimRight(dir, `\`)) {
+				return nil
+			}
+		}
+		return append(parts, dir)
+	})
+}
+
+// removeFromPath removes dir from the user's PATH.
+func removeFromPath(dir string) error {
+	return editPath(func(parts []string) []string {
+		out := parts[:0:0]
+		found := false
+		for _, p := range parts {
+			if strings.EqualFold(strings.TrimRight(p, `\`), strings.TrimRight(dir, `\`)) {
+				found = true
+				continue
+			}
+			out = append(out, p)
+		}
+		if !found {
+			return nil
+		}
+		return out
+	})
+}
+
+// editPath rewrites HKCU\Environment\Path. edit returns nil for no change.
+// The value type (usually REG_EXPAND_SZ) is preserved.
+func editPath(edit func([]string) []string) error {
+	k, err := registry.OpenKey(registry.CURRENT_USER, envKey, registry.QUERY_VALUE|registry.SET_VALUE)
+	if err != nil {
+		return err
+	}
+	defer k.Close()
+	cur, typ, err := k.GetStringValue("Path")
+	if err != nil && !errors.Is(err, registry.ErrNotExist) {
+		return err
+	}
+	var parts []string
+	for _, p := range strings.Split(cur, ";") {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	next := edit(parts)
+	if next == nil {
+		return nil
+	}
+	val := strings.Join(next, ";")
+	if typ == registry.SZ {
+		err = k.SetStringValue("Path", val)
+	} else {
+		err = k.SetExpandStringValue("Path", val)
+	}
+	if err != nil {
+		return err
+	}
+	// Tell Explorer so newly opened terminals see the change.
+	env, _ := windows.UTF16PtrFromString("Environment")
+	var result uintptr
+	windows.NewLazySystemDLL("user32.dll").NewProc("SendMessageTimeoutW").Call(
+		0xFFFF, 0x001A, 0, uintptr(unsafe.Pointer(env)), 0x0002, 2000, uintptr(unsafe.Pointer(&result)))
+	return nil
 }
