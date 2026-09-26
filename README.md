@@ -12,13 +12,7 @@ Drive for Desktop has no exclude setting. gdrive-ignore keeps your folder in two
 
 ## How it works
 
-```
-C:\code\my-app  (your folder)  ⇄  C:\Users\you\DriveMirror\my-app  (Drive copy)  ⇄  Google Drive  ⇄  other computers
-  src\           synced
-  node_modules\  ignored: never crosses in either direction
-```
-
-You add `C:\Users\you\DriveMirror` to Drive once (*Settings → Preferences → My Computer → Add folder*, "Sync with Google Drive"). Online, your folders appear under **Computers**.
+You add `C:\Users\you\DriveMirror` to Drive once (*Settings -> Preferences -> My Computer -> Add folder*, "Sync with Google Drive"). Online, your folders appear under **Computers**.
 
 | What happens | Result |
 |---|---|
@@ -60,6 +54,18 @@ Rules come from global rules (all folders), per-folder rules (typed or imported 
 2. In Google Drive, add `C:\Users\<you>\DriveMirror` under *My Computer* once.
 3. Click **Add folder**, pick your folder, set rules, click **Preview**, then **Save and start syncing**.
 
+## Windows security prompts
+
+The exe is not code-signed yet, so Windows may stop it the first time:
+
+- **"Windows protected your PC"** (blue SmartScreen screen): click **More info**, then **Run anyway**. This appears once per downloaded file.
+- **"An Application Control policy has blocked this file"** or the app silently doesn't start: this is **Smart App Control**. It checks unsigned programs online, and its verdict can differ between builds or change over time. It has no per-app exception. The only option is to turn it off in *Windows Security → App & browser control → Smart App Control settings*. Since the April 2026 Windows update it can be turned back on later.
+- If you turn Smart App Control back on after installing, it may block the installed app at the next sign-in.
+
+The same applies when **building**: the Go toolchain from the zip download is unsigned, and Smart App Control can block `go.exe` itself ("An Application Control policy has blocked this file"). Smart App Control also runs its check on the exe you build, so one build may run and the next be blocked. Build and test with Smart App Control off, or sign your builds.
+
+Signed releases will remove these prompts.
+
 ## Command line
 
 ```
@@ -85,11 +91,11 @@ gdrive-ignore install | uninstall [--purge]
 Requires Go 1.27+.
 
 ```powershell
-.\scripts\build.ps1 -Version 0.4.0     # -> dist\gdrive-ignore.exe
+.\scripts\build.ps1 -Version 0.4.4     # -> dist\gdrive-ignore.exe
 go test ./...
 ```
 
-Release builds should be **code-signed**: Windows Smart App Control can block unsigned executables.
+See [Windows security prompts](#windows-security-prompts) if Windows blocks `go.exe` or the built exe.
 
 ## Layout
 
