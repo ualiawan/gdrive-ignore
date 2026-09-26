@@ -623,7 +623,7 @@ func (r *run) sync(S, M *tree) {
 		return strings.Count(r.dirDels[i], "/") > strings.Count(r.dirDels[j], "/")
 	})
 	for _, rel := range r.dirDels {
-		if err := os.Remove(r.abs(dst, rel)); err == nil || errors.Is(err, os.ErrNotExist) {
+		if err := removeDir(r.abs(dst, rel)); err == nil || errors.Is(err, os.ErrNotExist) {
 			st.del(key(rel))
 		} else {
 			// Something we do not track is still inside (e.g. an ignored file): keep the folder.

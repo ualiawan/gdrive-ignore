@@ -163,3 +163,30 @@ func fixLongPath(p string) string {
 	}
 	return `\\?\` + p
 }
+
+// removeDir removes an empty folder in the mirror. Drive for Desktop marks
+// folders in computer folders read-only, which makes RemoveDirectory fail;
+// folders are never hardlinked, so clearing the attribute on the mirror's
+// folder cannot affect the source.
+func removeDir(p string) error {
+	err := os.Remove(p)
+	if err == nil || !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		return err
+	}
+	ptr, perr := windows.UTF16PtrFromString(fixLongPath(p))
+	if perr != nil {
+		return err
+	}
+	attrs, aerr := windows.GetFileAttributes(ptr)
+	if aerr != nil || attrs&windows.FILE_ATTRIBUTE_DIRECTORY == 0 || attrs&windows.FILE_ATTRIBUTE_READONLY == 0 {
+		return err
+	}
+	if serr := windows.SetFileAttributes(ptr, attrs&^windows.FILE_ATTRIBUTE_READONLY); serr != nil {
+		return err
+	}
+	if rerr := os.Remove(p); rerr != nil {
+		_ = windows.SetFileAttributes(ptr, attrs) // not empty after all: put it back
+		return rerr
+	}
+	return nil
+}

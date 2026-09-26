@@ -565,3 +565,23 @@ func TestConflictName(t *testing.T) {
 		}
 	}
 }
+
+// Drive for Desktop marks folders in computer folders read-only; deleting a
+// folder in the source must still remove it from the mirror.
+func TestSourceFolderDeleteRemovesReadOnlyMirrorFolder(t *testing.T) {
+	f := newFx(t)
+	f.write(src, "proj/sub/a.txt", "a")
+	e := f.engine()
+	f.sync(e)
+	for _, d := range []string{"proj", "proj/sub"} {
+		if err := setReadOnlyDir(filepath.Join(f.dst, filepath.FromSlash(d))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.remove(src, "proj")
+	st := f.sync(e)
+	if st.ErrorCount != 0 {
+		t.Fatalf("errors: %v", st.Errors)
+	}
+	f.wantBoth()
+}

@@ -52,3 +52,5 @@ func nearestExisting(p string) string {
 
 func removeFile(p string) error         { return os.Remove(p) }
 func replaceFile(tmp, dst string) error { return os.Rename(tmp, dst) }
+
+func removeDir(p string) error { return os.Remove(p) }
