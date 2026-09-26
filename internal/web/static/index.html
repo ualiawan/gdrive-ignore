@@ -55,12 +55,15 @@
     </div>
     <div class="card form">
       <h3>How it works</h3>
-      <p>Google Drive for Desktop has no way to exclude files. gdrive-ignore keeps a <strong>filtered mirror</strong> of each source folder inside a folder that Drive syncs, and leaves out everything your rules ignore. Drive then uploads the mirror as usual.</p>
+      <p>Google Drive for Desktop has no way to exclude files. gdrive-ignore keeps your folder in <strong>two-way sync</strong> with a Drive copy inside a folder that Drive syncs, and leaves out everything your rules ignore.</p>
       <ul>
-        <li>Your source folder is only ever read, never changed.</li>
-        <li>When the mirror is on the same drive as the source, files are <strong>hardlinked</strong>: no extra disk space and no copying.</li>
-        <li>The mirror is one-way. Edit files in the source, not in the mirror.</li>
-        <li>The app only ever deletes files it created itself.</li>
+        <li>Add, edit, rename or delete files in your folder: the changes reach Google Drive and your other computers.</li>
+        <li>Changes made online or on another computer come back into your folder, exactly like normal Google Drive.</li>
+        <li>Files deleted in Google Drive are moved to the <strong>Windows Recycle Bin</strong> here, never deleted permanently.</li>
+        <li>Deleting a file by hand in the Drive copy never deletes it from your folder: gdrive-ignore puts it back.</li>
+        <li>If it cannot tell where a deletion came from, it changes nothing and asks you.</li>
+        <li>Ignored files never cross in either direction, and adding a rule never deletes anything.</li>
+        <li>Files are <strong>hardlinked</strong>: the Drive copy takes no extra disk space.</li>
       </ul>
       <div class="toolbar">
         <button id="open-logs">Open log folder</button>
@@ -75,33 +78,26 @@
   <form method="dialog" id="editor-form">
     <h2 id="editor-title">Add folder</h2>
     <div class="grid">
-      <label>Source folder <span class="hint">the folder you work in</span>
+      <label>Your folder <span class="hint">the folder you work in on this PC</span>
         <div class="row"><input id="f-source" required placeholder="C:\Users\you\projects"><button type="button" id="pick-source">Browse…</button></div>
       </label>
-      <label>Sync to <span class="hint">where the filtered copy goes; Google Drive must sync this location</span>
+      <label>Drive copy in <span class="hint">a folder on this PC that Google Drive syncs (Settings → Preferences → My Computer)</span>
         <select id="f-location"></select>
       </label>
-      <label id="custom-target-wrap">Target folder
+      <label id="custom-target-wrap">Drive copy folder
         <div class="row"><input id="f-target" required><button type="button" id="pick-target">Browse…</button></div>
       </label>
       <div id="target-note" class="note"></div>
-      <p class="hint">The Drive copy mirrors this folder: files you delete here, or that a rule starts ignoring, are removed from the Drive copy too (Drive keeps them in its trash for 30 days). Changed files are updated, and Drive keeps their earlier versions. Your source folder itself is never changed.</p>
+      <p class="hint">Two-way, like normal Google Drive: changes and deletions in your folder reach Drive; changes and deletions made online or on another computer reach your folder (deleted files go to the Recycle Bin). Work in your folder, not in the Drive copy.</p>
       <label>Name <input id="f-name" placeholder="Shown in the list"></label>
     </div>
 
     <h3>Ignore rules</h3>
-    <p class="hint">One pattern per line, like .gitignore: <code>node_modules/</code>, <code>*.log</code>, <code>/build</code>, <code>!keep.log</code>. <code>.driveignore</code> files inside the source folder are applied too.</p>
+    <p class="hint">One pattern per line, like .gitignore: <code>node_modules/</code>, <code>*.log</code>, <code>/build</code>, <code>!keep.log</code>. <code>.driveignore</code> files inside your folder are applied too. Ignored files never sync in either direction.</p>
     <div class="rules-editor" id="pair-editor"></div>
     <div class="options">
       <label class="check"><input type="checkbox" id="f-global" checked> Apply global rules</label>
       <label class="check"><input type="checkbox" id="f-gitignore"> Also honor <code>.gitignore</code> files</label>
-      <label class="inline">Mode
-        <select id="f-mode">
-          <option value="auto">Automatic</option>
-          <option value="hardlink">Hardlink only</option>
-          <option value="copy">Always copy</option>
-        </select>
-      </label>
     </div>
 
     <div class="toolbar">
@@ -120,12 +116,11 @@
 
 <dialog id="confirm-remove">
   <form method="dialog">
-    <h2>Remove folder?</h2>
-    <p>Syncing stops. Your source folder is not touched.</p>
-    <label class="check"><input type="checkbox" id="remove-mirror"> Also delete the mirrored copy (only files gdrive-ignore created; Drive moves them to its trash)</label>
+    <h2>Stop syncing this folder?</h2>
+    <p>Syncing stops. Nothing is deleted: your folder and the Drive copy both keep their files.</p>
     <div class="toolbar end">
       <button value="cancel">Cancel</button>
-      <button value="ok" class="danger">Remove</button>
+      <button value="ok" class="danger">Stop syncing</button>
     </div>
   </form>
 </dialog>

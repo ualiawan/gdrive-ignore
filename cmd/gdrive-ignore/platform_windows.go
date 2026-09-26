@@ -31,7 +31,7 @@ func attachConsole() {
 // called. ok is false if another instance holds it (after waiting up to 10s
 // when wait is set, e.g. right after an install hands over).
 func singleInstance(name string, wait bool) (release func(), ok bool) {
-	n, _ := windows.UTF16PtrFromString(`Local\` + config.AppName + "-" + name)
+	n, _ := windows.UTF16PtrFromString(`Local\` + config.InstanceName(name))
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		h, err := windows.CreateMutex(nil, true, n)

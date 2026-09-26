@@ -120,3 +120,8 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
 .preview td.path { font-family: var(--mono); font-size: 12px; word-break: break-all; }
 .preview td.num { text-align: right; white-space: nowrap; }
 .preview .files { padding: 6px 8px; font-size: 12.5px; color: var(--muted); }
+ul.pending { list-style: none; padding: 0; margin: 8px 0; }
+ul.pending li { padding: 6px 0; border-top: 1px solid var(--line); }
+ul.pending code { font-weight: 600; }
+.row-actions { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+.row-actions button { font-size: 12px; padding: 3px 9px; }

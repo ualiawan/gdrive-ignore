@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // AppName is used for folders, the mutex and the autostart entry.
@@ -165,3 +167,17 @@ func writeAtomic(path string, b []byte) error {
 // StatePath is where a pair's two-way sync state (baseline and pending
 // decisions) is kept.
 func StatePath(id string) string { return filepath.Join(LocalDir(), "state", id+".v2.json") }
+
+// InstanceName is used for single-instance locks. A custom home (tests,
+// portable setups) gets its own name so it can run beside the installed app.
+func InstanceName(kind string) string {
+	name := AppName + "-" + kind
+	if h := os.Getenv(HomeEnv); h != "" {
+		sum := uint32(2166136261)
+		for _, c := range []byte(strings.ToLower(filepath.Clean(h))) {
+			sum = (sum ^ uint32(c)) * 16777619
+		}
+		name += "-" + strconv.FormatUint(uint64(sum), 16)
+	}
+	return name
+}

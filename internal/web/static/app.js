@@ -161,10 +161,10 @@ function renderPairs() {
   if (!state.pairs.length) {
     box.replaceChildren(h("div", { class: "empty" },
       h("h2", {}, "Keep junk out of Google Drive"),
-      h("p", {}, "Pick a folder, choose where its filtered copy goes, and list what to leave out."),
+      h("p", {}, "Sync a folder both ways with Google Drive, leaving out what your rules ignore."),
       h("ol", {},
         h("li", {}, "Add a folder you work in, such as a projects folder."),
-        h("li", {}, "Choose a location that Google Drive syncs."),
+        h("li", {}, "Keep the suggested Drive copy folder (DriveMirror) and add it to Google Drive once."),
         h("li", {}, "Add rules like node_modules/ or *.log, or use the templates."),
       ),
       h("div", {}, h("button", { class: "primary", onclick: () => openEditor() }, "Add your first folder")),
@@ -177,14 +177,14 @@ function renderPairs() {
 function pairCard(p) {
   const st = p.status || {};
   const stateKey = p.setupError ? "error" : (st.state || "starting");
-  const full = st.full || {};
+  const last = st.last || {};
   const notes = [];
 
   if (p.setupError) notes.push(h("div", { class: "note bad" }, p.setupError));
   if (stateKey === "needs-adopt") {
     notes.push(h("div", { class: "note warn" },
-      "The target folder already contains files. gdrive-ignore will add and update files there, and only ever deletes files it created itself.",
-      h("div", {}, h("button", { onclick: () => act(p.id, "adopt") }, "Use this folder anyway"))));
+      "The Drive folder already contains files. gdrive-ignore will merge both folders: every file is kept, and files that differ are kept side by side as \"(conflict …)\" copies. Nothing is deleted.",
+      h("div", {}, h("button", { onclick: () => act(p.id, "adopt") }, "Merge and start syncing"))));
   } else if (st.error && stateKey !== "error") {
     notes.push(h("div", { class: "note warn" }, "Some files could not be synced: " + st.error));
   } else if (st.error) {
@@ -194,30 +194,35 @@ function pairCard(p) {
   if (st.state && !st.watching && stateKey !== "error") {
     notes.push(h("div", { class: "note warn" }, "Live watching is unavailable; changes sync on the periodic rescan."));
   }
+  if (p.pending && p.pending.length) notes.push(pendingBox(p));
 
-  const modeBadge = st.mode === "hardlink"
-    ? h("span", { class: "badge", title: "Files are hardlinked: no extra disk space" }, "No extra space")
-    : st.mode === "copy" ? h("span", { class: "badge", title: "Files are copied into the target" }, "Copies") : null;
-
-  const recent = st.recent || {};
-  const activity = [recent.Linked + recent.Copied && `${count(recent.Linked + recent.Copied)} updated`,
-    recent.Removed && `${count(recent.Removed)} removed`].filter(Boolean).join(", ");
+  const a = st.activity || {};
+  const bits = [
+    a.Pushed && `${count(a.Pushed)} to Drive`,
+    a.Pulled && `${count(a.Pulled)} from Drive`,
+    a.Renamed && `${count(a.Renamed)} renamed`,
+    a.Conflicts && `${count(a.Conflicts)} conflict copies`,
+    a.DeletedInDrive && `${count(a.DeletedInDrive)} deleted in Drive`,
+    a.DeletedHere && `${count(a.DeletedHere)} moved to the Recycle Bin`,
+    a.Restored && `${count(a.Restored)} put back in Drive`,
+  ].filter(Boolean).join(", ");
 
   return h("div", { class: "card" },
     h("div", { class: "pair-head" },
       h("div", {},
         h("div", { class: "pair-name" }, p.name),
         h("div", { class: "paths" },
-          h("span", {}, "From"), h("button", { class: "link", onclick: () => openFolder(p.source), title: "Open in Explorer" }, p.source),
-          h("span", {}, "To"), h("button", { class: "link", onclick: () => openFolder(p.target), title: "Open in Explorer" }, p.target),
+          h("span", {}, "Folder"), h("button", { class: "link", onclick: () => openFolder(p.source), title: "Open in Explorer" }, p.source),
+          h("span", {}, "Drive copy"), h("button", { class: "link", onclick: () => openFolder(p.target), title: "Open in Explorer (work in your folder, not here)" }, p.target),
         ),
       ),
-      h("div", { class: "badges" }, h("span", { class: "badge " + stateKey }, stateLabels[stateKey] || stateKey), modeBadge),
+      h("div", { class: "badges" }, h("span", { class: "badge " + stateKey }, stateLabels[stateKey] || stateKey),
+        h("span", { class: "badge", title: "Changes sync both ways; files are hardlinked, so the Drive copy takes no extra space" }, "Two-way")),
     ),
-    st.lastFull && !st.lastFull.startsWith("0001")
+    st.lastSync && !st.lastSync.startsWith("0001")
       ? h("div", { class: "stats" },
-        `${count(full.Files)} files (${size(full.Bytes)}) mirrored · ${count(full.Ignored)} items ignored · last sync ${ago(st.lastSync)}`,
-        activity ? ` · recently ${activity}` : "")
+        `${count(last.Files)} files (${size(last.Bytes)}) in sync · ${count(last.Ignored)} items ignored · last sync ${ago(st.lastSync)}`,
+        bits ? ` · last change ${ago(st.activityAt)}: ${bits}` : "")
       : null,
     notes,
     h("div", { class: "actions" },
@@ -231,13 +236,35 @@ function pairCard(p) {
   );
 }
 
+// Deletions that could not be attributed safely wait here for the user.
+function pendingBox(p) {
+  const decide = async (path, decision) => {
+    try { await api("POST", `pairs/${p.id}/decide`, { path, decision }); } catch (e) { alert(e.message); }
+    refresh();
+  };
+  const rows = p.pending.map((d) => h("li", {},
+    h("code", {}, d.path + (d.dir ? "/" : "")),
+    h("div", { class: "hint" }, d.reason),
+    h("div", { class: "row-actions" },
+      h("button", { onclick: () => decide(d.path, "delete"), title: "Moves it to the Windows Recycle Bin" }, "Delete from this PC"),
+      h("button", { onclick: () => decide(d.path, "restore"), title: "Puts it back into the Drive copy; Drive uploads it again" }, "Put back in Drive"))));
+  return h("div", { class: "note warn" },
+    h("strong", {}, `${p.pending.length} deletion(s) need your decision`),
+    h("p", { class: "hint" }, "These disappeared from the Drive copy, but gdrive-ignore could not confirm that they were deleted in Google Drive (for example because it was not running at the time). Your files on this PC stay untouched until you decide."),
+    h("ul", { class: "pending" }, rows),
+    p.pending.length > 1 ? h("div", { class: "row-actions" },
+      h("button", { onclick: () => decide("", "delete") }, "Delete all from this PC"),
+      h("button", { onclick: () => decide("", "restore") }, "Put all back in Drive")) : null);
+}
+
 function driveHint(target) {
   const inSuggested = under(target, state.suggested);
   return h("div", { class: "note warn" },
-    "Google Drive does not sync this folder yet. In Google Drive, open Settings → Preferences → My Computer → Add folder, and choose ",
+    "Google Drive does not sync this folder yet. In Google Drive, open Settings → Preferences → My Computer → Add folder, choose ",
     h("code", {}, inSuggested ? state.suggested : target),
-    inSuggested ? " (once; every folder you mirror there is then synced)." : ".",
-    " You can keep the Drive option \"Sync with Google Drive\".");
+    " and keep \"Sync with Google Drive\"",
+    inSuggested ? " (once; every folder synced there is then included)." : ".",
+    " Until then, deletions in the Drive copy are held for your decision.");
 }
 
 async function act(id, action) {
@@ -247,13 +274,10 @@ async function act(id, action) {
 
 function removePair(p) {
   const dlg = $("#confirm-remove");
-  $("#remove-mirror").checked = false;
   dlg.returnValue = "";
   dlg.onclose = async () => {
     if (dlg.returnValue !== "ok") return;
-    try {
-      await api("DELETE", `pairs/${p.id}` + ($("#remove-mirror").checked ? "?deleteMirror=1" : ""));
-    } catch (e) { alert(e.message); }
+    try { await api("DELETE", `pairs/${p.id}`); } catch (e) { alert(e.message); }
     refresh();
   };
   dlg.showModal();
@@ -299,16 +323,20 @@ function rulesEditor(container) {
 let editing = null;
 let pairRules = null;
 
+// Only folders on this PC that Drive syncs as "computer folders" can hold
+// the Drive copy (hardlinks need the same drive; Drive's virtual G: cannot).
 function locationOptions() {
   const opts = [];
-  (state.drive.locations || []).filter((l) => l.exists).forEach((l, i) => {
-    const kind = l.kind === "stream" ? "uses extra disk space" : "no extra space if on the same drive";
-    opts.push({ value: "loc:" + i, label: `${l.label} (${kind})`, path: l.path });
+  (state.drive.locations || []).forEach((l, i) => {
+    if (l.exists && l.kind === "backup" && !under(l.path, state.suggested) && !under(state.suggested, l.path)) {
+      opts.push({ value: "loc:" + i, label: `${l.label} (${l.path})`, path: l.path });
+    }
   });
   if (state.suggested) {
-    opts.unshift({ value: "suggested", label: `Local mirror folder ${state.suggested} (recommended: no extra space)`, path: state.suggested });
+    const synced = (state.drive.locations || []).some((l) => l.kind === "backup" && under(state.suggested, l.path));
+    opts.unshift({ value: "suggested", label: `${state.suggested}${synced ? "" : " (add it to Google Drive once)"} (recommended)`, path: state.suggested });
   }
-  opts.push({ value: "custom", label: "Custom folder…", path: "" });
+  opts.push({ value: "custom", label: "Another folder on this PC…", path: "" });
   return opts;
 }
 
@@ -332,18 +360,18 @@ function updateTargetNote(preview) {
   note.className = "note";
   if (!target) { note.replaceChildren(); return; }
   const covered = (state.drive.locations || []).find((l) => under(target, l.path));
-  const parts = [];
-  if (covered) {
-    parts.push(`Google Drive syncs this location (${covered.label}).`);
-    if (covered.kind === "stream") parts.push(" Files are copied into Drive's virtual drive, which uses extra disk space and Drive's cache.");
-  } else {
+  if (covered && covered.kind === "stream") {
+    note.classList.add("bad");
+    note.replaceChildren("This is Google Drive's virtual drive. Choose a folder on this PC that Drive syncs, such as ", h("code", {}, state.suggested || "DriveMirror"), ".");
+    return;
+  }
+  if (!covered) {
     note.classList.add("warn");
     note.replaceChildren(...driveHint(target).childNodes);
     return;
   }
-  if (preview) {
-    parts.push(preview.hardlinkCapable ? " Files will be hardlinked: no extra space." : " Files will be copied.");
-  }
+  const parts = [`Google Drive syncs this folder (${covered.label}); online it appears under Computers.`];
+  if (preview && !preview.sameDrive) parts.push(" It must be on the same drive as your folder.");
   note.replaceChildren(parts.join(""));
 }
 
@@ -367,7 +395,6 @@ function openEditor(pair) {
     pairRules.set(pair.rules);
     $("#f-global").checked = pair.useGlobal;
     $("#f-gitignore").checked = pair.honorGitignore;
-    $("#f-mode").value = pair.mode || "auto";
     const match = opts.find((o) => o.path && o.value !== "custom" &&
       pair.target.toLowerCase() === joinPath(o.path, basename(pair.source)).toLowerCase());
     sel.value = match ? match.value : "custom";
@@ -378,7 +405,6 @@ function openEditor(pair) {
     pairRules.set("");
     $("#f-global").checked = true;
     $("#f-gitignore").checked = false;
-    $("#f-mode").value = "auto";
     sel.value = opts[0].value;
   }
   updateTargetNote();
@@ -393,23 +419,21 @@ function draft() {
     rules: pairRules.get(),
     useGlobal: $("#f-global").checked,
     honorGitignore: $("#f-gitignore").checked,
-    mode: $("#f-mode").value,
   };
 }
 
 async function runPreview() {
   const d = draft();
-  if (!d.source) { $("#editor-error").textContent = "Choose a source folder first."; return; }
+  if (!d.source) { $("#editor-error").textContent = "Choose your folder first."; return; }
   $("#editor-error").textContent = "";
   $("#preview-summary").textContent = "Scanning…";
   $("#preview-btn").disabled = true;
   try {
     const r = await api("POST", "preview", d);
-    const s = r.stats;
     const ignoredBytes = r.ignored.reduce((a, e) => a + e.size, 0);
     const ignoredFiles = r.ignored.reduce((a, e) => a + e.count, 0);
     $("#preview-summary").textContent =
-      `${count(s.Files)} files (${size(s.Bytes)}) will sync · ${count(s.Ignored)} items ignored: ${count(ignoredFiles)} files, ${size(ignoredBytes)}`;
+      `${count(r.files)} files (${size(r.bytes)}) will sync · ${count(r.ignored.length + (r.truncated || 0))} items ignored: ${count(ignoredFiles)} files, ${size(ignoredBytes)}`;
     const rows = r.ignored.map((e) => h("tr", {},
       h("td", { class: "path" }, e.path + (e.dir ? "/" : "")),
       h("td", { class: "num" }, size(e.size)),
@@ -498,11 +522,11 @@ async function init() {
   $("#f-source").addEventListener("change", updateTarget);
   $("#f-target").addEventListener("input", () => { $("#f-location").value = "custom"; updateTargetNote(); });
   $("#pick-source").addEventListener("click", async () => {
-    const p = await pickFolder("Choose the folder to sync", $("#f-source").value);
+    const p = await pickFolder("Choose your folder", $("#f-source").value);
     if (p) { $("#f-source").value = p; updateTarget(); }
   });
   $("#pick-target").addEventListener("click", async () => {
-    const p = await pickFolder("Choose where the filtered copy goes", $("#f-target").value);
+    const p = await pickFolder("Choose the Drive copy folder", $("#f-target").value);
     if (p) { $("#f-target").value = p; $("#f-location").value = "custom"; updateTargetNote(); }
   });
   $("#global-save").addEventListener("click", async () => {

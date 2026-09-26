@@ -32,7 +32,7 @@ var ErrNoWebView = errors.New("WebView2 runtime not available")
 // an upgrade) and the page lost its connection. If a window is
 // already open, it is brought to the front instead.
 func Run(url string, reconnect func() (string, error)) error {
-	name, _ := windows.UTF16PtrFromString(`Local\` + config.AppName + "-ui")
+	name, _ := windows.UTF16PtrFromString(`Local\` + config.InstanceName("ui"))
 	m, err := windows.CreateMutex(nil, false, name)
 	if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
 		windows.CloseHandle(m)
