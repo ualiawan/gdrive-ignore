@@ -165,14 +165,25 @@ func Uninstall(purge bool) error {
 	if purge {
 		dirs = append(dirs, config.Dir(), config.LocalDir())
 	}
-	// Delete folders once we have exited (the exe may be inside one).
+	// Delete folders once we have exited (the exe may be inside one). The
+	// command line is passed raw: Go's argument quoting (\") is not what
+	// cmd.exe understands, and /s makes cmd strip exactly the outer quotes.
 	var cmd strings.Builder
-	cmd.WriteString("ping -n 3 127.0.0.1 >nul")
+	cmd.WriteString("ping -n 4 127.0.0.1 >nul")
 	for _, d := range dirs {
 		cmd.WriteString(` & rmdir /s /q "` + d + `"`)
 	}
-	c := exec.Command("cmd.exe", "/c", cmd.String())
-	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000} // CREATE_NO_WINDOW
+	comspec := os.Getenv("ComSpec")
+	if comspec == "" {
+		comspec = `C:\Windows\System32\cmd.exe`
+	}
+	c := exec.Command(comspec)
+	c.SysProcAttr = &syscall.SysProcAttr{
+		CmdLine:       `cmd.exe /d /s /c "` + cmd.String() + `"`,
+		HideWindow:    true,
+		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+	}
+	c.Dir = os.TempDir() // do not hold the program folder as working directory
 	if err := c.Start(); err != nil {
 		errs = append(errs, err)
 	}
@@ -217,38 +228,17 @@ const envKey = `Environment`
 
 // addToPath appends dir to the user's PATH if missing.
 func addToPath(dir string) error {
-	return editPath(func(parts []string) []string {
-		for _, p := range parts {
-			if strings.EqualFold(strings.TrimRight(p, `\`), strings.TrimRight(dir, `\`)) {
-				return nil
-			}
-		}
-		return append(parts, dir)
-	})
+	return editPath(func(cur string) (string, bool) { return pathWith(cur, dir) })
 }
 
 // removeFromPath removes dir from the user's PATH.
 func removeFromPath(dir string) error {
-	return editPath(func(parts []string) []string {
-		out := parts[:0:0]
-		found := false
-		for _, p := range parts {
-			if strings.EqualFold(strings.TrimRight(p, `\`), strings.TrimRight(dir, `\`)) {
-				found = true
-				continue
-			}
-			out = append(out, p)
-		}
-		if !found {
-			return nil
-		}
-		return out
-	})
+	return editPath(func(cur string) (string, bool) { return pathWithout(cur, dir) })
 }
 
-// editPath rewrites HKCU\Environment\Path. edit returns nil for no change.
-// The value type (usually REG_EXPAND_SZ) is preserved.
-func editPath(edit func([]string) []string) error {
+// editPath rewrites HKCU\Environment\Path when edit reports a change. The
+// value type (usually REG_EXPAND_SZ) is preserved.
+func editPath(edit func(string) (string, bool)) error {
 	k, err := registry.OpenKey(registry.CURRENT_USER, envKey, registry.QUERY_VALUE|registry.SET_VALUE)
 	if err != nil {
 		return err
@@ -258,17 +248,10 @@ func editPath(edit func([]string) []string) error {
 	if err != nil && !errors.Is(err, registry.ErrNotExist) {
 		return err
 	}
-	var parts []string
-	for _, p := range strings.Split(cur, ";") {
-		if p != "" {
-			parts = append(parts, p)
-		}
-	}
-	next := edit(parts)
-	if next == nil {
+	val, changed := edit(cur)
+	if !changed {
 		return nil
 	}
-	val := strings.Join(next, ";")
 	if typ == registry.SZ {
 		err = k.SetStringValue("Path", val)
 	} else {
